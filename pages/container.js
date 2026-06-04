@@ -1,6 +1,35 @@
 document.addEventListener('DOMContentLoaded', () => {
+  if (window.self !== window.top) {
+    document.body.classList.add('embedded');
+  }
+
   const tabs = document.querySelectorAll('.tab');
   const frames = document.querySelectorAll('iframe');
+  const trainFrame = document.getElementById('training-frame');
+  const archiveFrame = document.getElementById('archive-frame');
+
+  // Relay background progress to iframes (avoid extra runtime.onMessage listeners there).
+  browser.runtime.onMessage.addListener((message) => {
+    if (message?.action) {
+      return undefined;
+    }
+    if (!message?.type) {
+      return undefined;
+    }
+    const trainingTypes = new Set([
+      'training-progress',
+      'training-complete',
+      'folder-sync-start',
+      'folder-sync-complete'
+    ]);
+    if (trainingTypes.has(message.type)) {
+      trainFrame?.contentWindow?.postMessage(message, '*');
+    }
+    if (message.type === 'classification-progress' || message.type === 'training-complete') {
+      archiveFrame?.contentWindow?.postMessage(message, '*');
+    }
+    return undefined;
+  });
   
   function switchTab(targetId) {
     // Hide all frames

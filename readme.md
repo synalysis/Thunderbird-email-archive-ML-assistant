@@ -1,108 +1,117 @@
-# Email Archive ML Assistant
+# Email Archive Assistant
 
-The objective of this application, which is used as an extension for Mozilla Thunderbird, is to assist the user in archiving messages from the inbox into various archive folders.
-To achieve this, the application studies how previous messages have been archived, creates a Machine Learning model by analyzing the contents of archive folders, and uses this model to suggest the appropriate folder for archiving a new message.
+Thunderbird WebExtension that helps archive inbox mail into your archive folders using **local AI** ([Ollama](https://ollama.com)) on your machine—no cloud.
 
-The application was developed as an exercise to verify the feasibility of creating a functional application with the following constraints:
-- The code must be written entirely by Artificial Intelligence.
-- The code must use functions and APIs that are not part of the training data of the AI models used.
+The add-on **indexes** sample messages from folders you select (embeddings + folder paths), then **matches** new inbox mail to those folders by similarity (RAG). You review suggestions on the **Archive** tab or pick a folder while reading mail; each move can **update the index** so the system learns from your choices.
 
-## Requirements:
-- The application must be fully integrated into Mozilla Thunderbird.
-- Internal data storage must be managed using Thunderbird's storage APIs.
-- For all phases, the application must synchronize IMAP with the mail server.
+**Requires Thunderbird 128+** (Manifest V3). Current package version: see `manifest.json` (e.g. **1.7.2**).
 
-The application is divided into two parts:
-- **Training:** where the Machine Learning model is created.
-- **Archive:** where the model is used to suggest the archive folder and archive the message.
+## Quick start
 
-## Training
-- The application retrieves the email accounts present in the Thunderbird client.
-- For each account, it retrieves all archive folders, distinguishing between system folders (Inbox, Sent, Drafts, Trash, Junk, etc.) and personal archive folders.
-- The user selects the mailbox to be trained.
-- The application presents a list of folders to be used for the Machine Learning model, automatically selecting all personal folders and excluding system folders.
-- The user can modify the initial selection.
-- The folder selection is stored in internal storage.
-- A Machine Learning model is created for each selected mailbox.
-- It is possible to delete and recreate the Machine Learning model.
+1. **Install Ollama** and pull models:
+   ```bash
+   ollama pull qwen2.5:3b-instruct
+   ollama pull nomic-embed-text
+   ```
+2. **Start Ollama with CORS** (required for Thunderbird; otherwise NetworkError / 403):
+   ```bash
+   OLLAMA_ORIGINS="moz-extension://*" ollama serve
+   ```
+   Or: `./scripts/ollama-serve-thunderbird.sh`  
+   On Linux with the `ollama` systemd service: `sudo systemctl edit ollama` and add  
+   `Environment="OLLAMA_ORIGINS=moz-extension://*"`, then `sudo systemctl daemon-reload && sudo systemctl restart ollama`.
+3. **Install the add-on** (see [Installing the add-on](#installing-the-add-on) below).
+4. **Open the assistant**
+   - Click the **add-on toolbar icon** → **Open assistant**, or  
+   - **Add-ons and Themes** → **Email Archive Assistant** → **Preferences** → **Open assistant**, or  
+   - **≡ (app menu) → Tools** → **Open Email Archive Assistant** (if listed), or  
+   - Shortcut **Alt+Shift+A**
+5. **Training tab:** choose account, select archive folders, set Ollama URL/models if needed, **Test connection**, then **build the index**.
+6. **Archive tab:** classify inbox messages (RAG), adjust confidence threshold, **Archive confident** to move in bulk.
+7. **While reading mail:** use **Archive to folder** on the message toolbar (searchable popup, best match first with **%** scores). In **Inbox**, right-click → **Archive to folder** for a ranked submenu (top 25) or **Filter folders…** for the full list.
 
-## Archive
-- The application allows selecting the mailbox to be used for archiving, choosing among the mailboxes for which a Machine Learning model has been created.
-- The user selects a probability threshold, above which a message will be suggested for archiving.
-- All messages present in the selected mailbox's Inbox are displayed.
-- The user can select all or some messages to be classified.
-- The selected messages are classified with an assigned archive folder and an indication of classification confidence.
-- The user can select messages to be archived.
-- The selected messages are moved from the Inbox to the archive folder determined by the Machine Learning model.
+Default Ollama URL: `http://127.0.0.1:11434` (change on the Training tab). For a custom host, approve the permission prompt when **Test connection** asks for it.
 
-## Development with AI
-The development was primarily conducted using Cursor rel. 0.45 and partially with Codeium Windsurf rel. 1.2.2, both using Anthropic Claude 3.5 Sonnet as LLM.
-To create the development plan, the initial specifications where improved using ChapGPT o1.
+If `curl http://127.0.0.1:11434/api/tags` works but Thunderbird does not, it is usually **Ollama CORS**. Restart Ollama with `OLLAMA_ORIGINS="moz-extension://*"` as above.
 
+**After changing the embedding model**, rebuild the index on the Training tab. Old embeddings will not rank correctly with a new model.
 
-### External Documentation
-Although these tools already had web search capabilities at the time, the development of this project assumed that Thunderbird documentation was not publicly available, as in the case of a closed-source project.
-For this reason, the "ThunderbirdDocScraper.py" script in the "utils" folder was used to download Thunderbird documentation in markdown format and made available to Cursor within the "_Docs\thunderbird_docs" folder.
+## Features
 
-### Development Plan Creation
+| Area | What it does |
+|------|----------------|
+| **Training** | Per-account folder tree; index up to *N* samples per folder (configurable, default 10); optional global cap on total indexed messages; stores embeddings in Thunderbird `storage.local`. |
+| **Archive** | Lists inbox messages; classifies with **RAG only** (one embed per message, no per-message chat call); confidence threshold; bulk move. |
+| **Archive to folder** | Message toolbar popup: filter folders, list sorted by **match %**, preselect best match, Enter to move; learns from your pick. |
+| **Inbox context menu** | **Archive to folder** submenu (ranked, up to 25 folders) + **Filter folders…** for the popup when you have many folders. |
+| **Toolbar / shortcuts** | Icon popup: open assistant or settings; **Alt+Shift+A** opens the assistant. |
 
-To create the development plan, the app designer wrote the initial specifications. 
-These specifications were then used to create the development plan with ChatGPT o1.
+Classification and folder ranking use **cosine similarity** between the current message embedding and indexed samples—not a separate “black box” pick in the menu or archive batch flow.
 
-#### Initial Specifications
+## Installing the add-on
+
+Thunderbird cannot install a bare `manifest.json`. Use a packaged **`.xpi`** or a temporary load for development.
+
+**Permanent install**
+
+1. Build locally: `./package-addon.sh` → `Email-Archive-Assistant-<version>.xpi`  
+   Or download the latest `.xpi` from **Actions → Build add-on → Artifacts** (`email-archive-assistant-xpi`), or from a **Release** when you push a tag like `v1.7.2`.
+2. **Add-ons and Themes** → gear → **Install Add-on From File…**
+3. Select the `.xpi` file.
+
+After upgrades, reload or reinstall the add-on if behavior seems stale. Remove an old version first if you hit odd menu or permission issues.
+
+**Development (reload after each change)**
+
+1. `about:debugging` → **This Thunderbird** → **Load Temporary Add-on…**
+2. Choose `manifest.json` from this project.
+
+## Project layout
+
 ```
-    # E-mail archiver
-
-    The app works as a Thunderbird plugin and helps users to archive e-mails in mailbox folders, based on previously archived e-mail
-
-    The app is divided in two part:
-    1. Archive Models training
-    2. E-mail archive
-
-    ## 1 - Archive Model Traning
-    - The Archive Model Training option is available from the Tools menu
-    - The users select one of the available mailbox
-    - The app reads the name of all the user created folders as absolute path inside the mailbox (e.g. "mailbox/folder/subfolder/sub-subfolder")
-    - The model training features of the app ignores the standard folders like Inbox, Sent, Draft, Recycle Bin
-    - When the user confirm that the training should start, 
-        - the app reads all the emails source data as the features of the Machine Learning training process (From, To, servers, Subject, Mail body) of all the user created folders except the folders that should be ignored. The attachments are also ignored and not used for the training
-        - The folder name is the target
-    - The model is saved as model_<email-address>
-
-    ## E-mail archive
-    - The E-mail archive option is available in the Tools menu
-    - When this option is selected, a new tab/Window is opened in Thunderbird
-    - The user select one mailbox from the mailboxes available. The mailboxes available are the one with a model previously created
-    - When the mailbox is selected, in the new open tab will be displayed the messages of the Inbox with this columns
-        - Select check box (start as not selected)
-        - From
-        - Date
-        - Target Folder (start as empty)
-        - Subject
-    - The user click a [classify] button
-    - The app, using the trained model, classify each e-mail adding the predicted destination folder in the Target Folder column
-    - The user select the e-mails he wants to move
-    - The user click the Move button, and the selected e-mail are moved in the folder that has been written in the Target folder column
-    - The user close the tab/Windows and the memory is freed
+manifest.json
+background/          # background scripts (menus, index, Ollama, moves)
+pages/               # assistant UI, training, archive, folder picker, options
+icons/
+package-addon.sh     # build .xpi
+scripts/             # e.g. ollama-serve-thunderbird.sh
 ```
 
-#### Development Plan with ChatGPT o1
-The development plan was created using ChapGPT o1 using the initial specifications as context.
-You can find the development plan in the file ["_Docs\DevelopmentPlan.md"](_Docs\DevelopmentPlan.md)
+## Requirements (design)
 
-### Development with Cursor (and Windsurf)
+- Fully integrated Thunderbird WebExtension (accounts, folders, messages, storage).
+- Mail stays on the server (IMAP sync is Thunderbird’s normal behavior).
+- No cloud APIs; Ollama runs locally.
 
-After defining the work plan and preparing the external documentation useful for project development, the instructions were fed into Cursor with the following initial prompt:
-```
-Please crete the app described in @DevelopmentPlan.md 
-The app is about a Mozilla Thunderbird extension and in @thunderbird_docs you can find a complete documentation of the latest version of Thunderbird WebExtension API, also with some example.
-Please, keep the code as simple as possible.
-```
+## Training (behavior)
 
-The full list of prompt passed, step by step, to Cursor is available in the file ["_Docs\CursorPrompts.md"](_Docs\CursorPrompts.md)
+- Lists email accounts and folders; system folders (Inbox, Sent, Drafts, Trash, Junk, etc.) are excluded from the default selection.
+- User selects folders and starts indexing; selection is saved per account.
+- Index is stored per account (`index_<accountId>`); can be deleted and rebuilt from the Training tab.
+- Settings: chat model (reserved for future/optional flows), **embedding model** (required for index and ranking), samples per folder, optional total message cap.
 
-### Cursor rules
+## Archive (behavior)
 
-This project as been developed with setting the Cursor rules. The Cursor rules have been included later in the project as an example of how to use the Cursor rules.
-The Cursor rules have been created using Grok Deep Reaserch with the prompt described in the file ["_Docs\Create-rules-with-Grok.md"](_Docs\Create-rules-with-Grok.md)
+- Choose an account that has an index.
+- Set a **confidence threshold** (%); messages at or above it qualify for **Archive confident**.
+- Classify inbox (batched); edit target folder in the table if needed; move selected or confident messages to the predicted folder.
 
+## Troubleshooting
+
+| Symptom | Things to check |
+|---------|------------------|
+| Ollama connection fails | `ollama serve` with `OLLAMA_ORIGINS`; **Test connection** on Training; Flatpak/snap may need the same URL as in Training. |
+| Folder list alphabetical, no **%** | Ollama off, index missing, or **embed model changed** without rebuild; read the status line in the folder picker. |
+| **Archive to folder** button missing | Message toolbar **⋯ Customize** → add **Archive to folder**. |
+| Preferences greyed out | Old add-on without `options_ui`; install a current `.xpi`. |
+| No Tools menu entries | Use toolbar icon or **Alt+Shift+A**; extension items appear under **≡ → Tools** when registered. |
+
+## Development background
+
+The project was built as an exercise: application code written with AI assistance, using Thunderbird WebExtension APIs documented via a local scrape (`utils/ThunderbirdDocScraper.py` → `_Docs/thunderbird_docs`).
+
+Tools used include Cursor, Windsurf, Claude, and ChatGPT o1 for planning. See `_Docs/DevelopmentPlan.md`, `_Docs/CursorPrompts.md`, and `.cursor/rules/` for history and conventions.
+
+### Initial specifications (summary)
+
+Two parts: (1) train on user archive folders—message content as features, folder path as label; (2) archive inbox messages with predicted folder and user-confirmed moves. Full original spec text remains in the git history of this file and in `_Docs/DevelopmentPlan.md`.

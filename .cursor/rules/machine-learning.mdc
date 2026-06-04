@@ -4,7 +4,7 @@ globs:
 ---
 
 # Machine Learning Integration
-- Use a JavaScript library like TensorFlow.js for machine learning tasks. 
-- Load and use a pre-trained model for email classification. 
-- Process email content efficiently. 
-- Ensure the model is accurate and efficient.
+- Use Ollama on localhost for LLM classification and embeddings (nomic-embed-text).
+- Build a per-account folder index (RAG) from archived messages; classify inbox mail via similar examples + JSON LLM output.
+- Process email content efficiently; cap body preview length; sample up to N messages per archive folder (configurable on Training tab, default 10). Avoid a low global index cap that forces only a few samples per folder when many folders are selected.
+- Handle Ollama offline errors with clear user messages.

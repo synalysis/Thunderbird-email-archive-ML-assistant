@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Email Archive Assistant</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 12px;
+      min-width: 240px;
+    }
+    button {
+      display: block;
+      width: 100%;
+      margin: 6px 0;
+      padding: 10px 12px;
+      font: inherit;
+      cursor: pointer;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      background: #f5f5f5;
+    }
+    button.primary {
+      background: #2d6a4f;
+      color: #fff;
+      border-color: #1b4332;
+    }
+    #status {
+      margin: 8px 0 0;
+      font-size: 0.85em;
+      color: #666;
+      min-height: 1.2em;
+    }
+    #status.error {
+      color: #862e2e;
+    }
+  </style>
+</head>
+<body>
+  <button type="button" id="openAssistant" class="primary">Open assistant</button>
+  <button type="button" id="openSettings">Settings (Training &amp; Archive)</button>
+  <p id="status"></p>
+  <script src="action-popup.js"></script>
+</body>
+</html>

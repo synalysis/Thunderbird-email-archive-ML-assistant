@@ -1,0 +1,92 @@
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  margin: 0;
+  padding: 10px;
+  width: 340px;
+  max-height: 420px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#folderFilter {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.85em;
+  color: #555;
+}
+
+#folderList {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 120px;
+  max-height: 300px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  position: relative;
+  z-index: 1;
+}
+
+#folderList li button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  border-bottom: 1px solid #eee;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+}
+
+#folderList li button:hover,
+#folderList li button:focus {
+  background: #e8f4ec;
+  outline: none;
+}
+
+#folderList li button.selected {
+  background: #d4edda;
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 #2d6a4f;
+}
+
+#folderList li:last-child button {
+  border-bottom: none;
+}
+
+.status {
+  margin: 0;
+  font-size: 0.85em;
+  color: #666;
+}
+
+.status.error {
+  color: #862e2e;
+}
+
+.status.success {
+  color: #1b4332;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+}

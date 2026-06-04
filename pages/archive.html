@@ -160,10 +160,51 @@
     .refresh-button:active {
       background: #d0d0d0;
     }
+
+    .primary-button {
+      font-weight: 600;
+      background: #2d6a4f;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+    }
+
+    .primary-button:hover:not(:disabled) {
+      background: #1b4332;
+    }
+
+    .primary-button:disabled {
+      background: #95b8a8;
+      color: #eee;
+    }
+
+    .secondary-button {
+      background: #f0f0f0;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+
+    .ollama-status {
+      margin: 0 8px 8px;
+      padding: 6px 10px;
+      font-size: 0.9em;
+      border-radius: 4px;
+    }
+
+    .ollama-status.ok {
+      background: #e8f4ec;
+      color: #1b4332;
+    }
+
+    .ollama-status.error {
+      background: #ffe6e6;
+      color: #862e2e;
+    }
   </style>
 </head>
 <body>
   <h2>Email Archive Assistant</h2>
+  <div id="ollamaStatus" class="ollama-status">Checking Ollama…</div>
   
   <div class="account-section">
     <select id="accountSelect">
@@ -178,8 +219,9 @@
       <input type="range" id="confidenceSlider" min="0" max="100" value="50" step="5">
       <span id="confidenceValue">50%</span>
     </div>
-    <button id="classifyButton">Classify Selected</button>
-    <button id="moveButton" disabled>Move Selected</button>
+    <button id="archiveConfidentButton" class="primary-button" disabled>Archive confident</button>
+    <button id="reclassifyButton" class="secondary-button">Re-classify all</button>
+    <button id="moveSelectedButton" class="secondary-button" disabled>Move selected</button>
   </div>
   
   <div id="status"></div>
@@ -199,6 +241,8 @@
     </tbody>
   </table>
 
+  <script src="bg-api.js"></script>
+  <script src="ollama-client.js"></script>
   <script src="archive.js"></script>
 </body>
 </html>

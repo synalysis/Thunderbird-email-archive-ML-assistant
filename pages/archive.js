@@ -1,20 +1,48 @@
 let currentAccount = null;
 let messages = [];
-let currentSort = { column: 'date', direction: 'desc' };
+let isClassifying = false;
 
-// Helper function to get confidence class
+// One embedding per message (RAG match, no LLM); small batches avoid sendMessage timeouts.
+const CLASSIFY_BATCH_SIZE = 1;
+
 function getConfidenceClass(confidence) {
   if (confidence >= 80) return 'confidence-high';
   if (confidence >= 50) return 'confidence-medium';
   return 'confidence-low';
 }
 
-// Sort messages function
+function getConfidenceThreshold() {
+  return parseInt(document.getElementById('confidenceSlider').value, 10);
+}
+
+function applyPredictionToRow(index, prediction, threshold) {
+  const message = messages[index];
+  message.predictedFolder = prediction.folder;
+  message.confidence = prediction.confidence;
+
+  const rows = document.getElementById('messageList').getElementsByTagName('tr');
+  const row = rows[index];
+  if (!row) return;
+
+  const targetCell = row.querySelector('.target-folder');
+  const confidenceCell = row.querySelector('.confidence-value');
+  targetCell.textContent = prediction.folder || '';
+  confidenceCell.textContent = prediction.confidence
+    ? `${prediction.confidence.toFixed(1)}%`
+    : '';
+  confidenceCell.className = `col-confidence confidence-value ${getConfidenceClass(prediction.confidence)}`;
+
+  if (prediction.confidence < threshold) {
+    targetCell.classList.add('low-confidence');
+  } else {
+    targetCell.classList.remove('low-confidence');
+  }
+}
+
 function sortMessages(field, ascending = true) {
   messages.sort((a, b) => {
-    let aValue, bValue;
-    
-    // Get the correct values based on field
+    let aValue;
+    let bValue;
     switch (field) {
       case 'from':
         aValue = (a.author || '').toLowerCase();
@@ -33,425 +61,151 @@ function sortMessages(field, ascending = true) {
         bValue = (b.predictedFolder || '').toLowerCase();
         break;
       case 'confidence':
-        aValue = isNaN(a.confidence) ? -1 : a.confidence;
-        bValue = isNaN(b.confidence) ? -1 : b.confidence;
+        aValue = Number.isFinite(a.confidence) ? a.confidence : -1;
+        bValue = Number.isFinite(b.confidence) ? b.confidence : -1;
         break;
       default:
         return 0;
     }
-    
-    // Handle null/undefined values
-    if (aValue === null || aValue === undefined) aValue = '';
-    if (bValue === null || bValue === undefined) bValue = '';
-    
-    // Compare values
     if (aValue < bValue) return ascending ? -1 : 1;
     if (aValue > bValue) return ascending ? 1 : -1;
     return 0;
   });
-  
   updateTable();
 }
 
-// Update table display
 function updateTable() {
   const messageList = document.getElementById('messageList');
+  const threshold = getConfidenceThreshold();
   messageList.innerHTML = '';
-  
+
   messages.forEach((message, index) => {
     const row = document.createElement('tr');
     row.dataset.messageId = message.id;
-    
-    const confidenceClass = message.confidence ? 
-      getConfidenceClass(message.confidence) : '';
-    const confidenceDisplay = message.confidence ? 
-      `${message.confidence.toFixed(1)}%` : '';
-    
+    const confidenceClass = message.confidence
+      ? getConfidenceClass(message.confidence)
+      : '';
+    const confidenceDisplay = message.confidence
+      ? `${message.confidence.toFixed(1)}%`
+      : '';
+    const lowClass = message.confidence && message.confidence < threshold
+      ? 'low-confidence'
+      : '';
+
     row.innerHTML = `
       <td><input type="checkbox" data-index="${index}"></td>
       <td class="col-date">${new Date(message.date).toLocaleDateString()}</td>
       <td class="col-from">${escapeHtml(message.author || '')}</td>
       <td class="col-subject">${escapeHtml(message.subject || '')}</td>
       <td class="col-confidence confidence-value ${confidenceClass}">${confidenceDisplay}</td>
-      <td class="col-target target-folder">${message.predictedFolder || ''}</td>
+      <td class="col-target target-folder ${lowClass}">${escapeHtml(message.predictedFolder || '')}</td>
     `;
-    
     messageList.appendChild(row);
   });
-  
-  // Add change listeners to checkboxes
-  const checkboxes = messageList.querySelectorAll('input[type="checkbox"]');
-  checkboxes.forEach(checkbox => {
-    checkbox.addEventListener('change', updateMoveButton);
+
+  messageList.querySelectorAll('input[type="checkbox"]').forEach(checkbox => {
+    checkbox.addEventListener('change', updateActionButtons);
   });
-  
-  // Initialize resizing after table is created
   initializeColumnResizing();
+  updateActionButtons();
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-  const messageList = document.getElementById('messageList');
-  const accountSelect = document.getElementById('accountSelect');
-  const refreshButton = document.getElementById('refreshAccounts');
-  const classifyButton = document.getElementById('classifyButton');
-  const moveButton = document.getElementById('moveButton');
-  const selectAll = document.getElementById('selectAll');
+async function classifyAllMessages() {
+  if (!currentAccount || isClassifying) return;
+
   const status = document.getElementById('status');
-  const confidenceSlider = document.getElementById('confidenceSlider');
-  const confidenceValue = document.getElementById('confidenceValue');
-  
-  // Load accounts and check for trained models
-  async function loadAccounts() {
-    try {
-      refreshButton.disabled = true;
-      refreshButton.textContent = '⌛'; // Show loading state
-      
-      const background = await browser.runtime.getBackgroundPage();
-      const accounts = await browser.accounts.list();
-      const trainedAccounts = await background.emailArchive.getTrainedAccounts();
-      
-      // Clear and populate account select
-      accountSelect.innerHTML = '<option value="">Select Account</option>';
-      
-      for (const account of accounts) {
-        // Only show accounts that have trained models
-        if (trainedAccounts.includes(account.id)) {
-          const option = document.createElement('option');
-          option.value = account.id;
-          option.textContent = account.name;
-          accountSelect.appendChild(option);
-        }
-      }
-      
-      // If we have a current account and it's still trained, keep it selected
-      if (currentAccount && trainedAccounts.includes(currentAccount.id)) {
-        accountSelect.value = currentAccount.id;
-      } else {
-        currentAccount = null;
-        accountSelect.value = '';
-      }
-      
-      // Update UI state
-      classifyButton.disabled = !currentAccount;
-      moveButton.disabled = true;
-      
-      // Clear message list if no account selected
-      if (!currentAccount) {
-        messageList.innerHTML = '<tr><td colspan="6">Please select an account</td></tr>';
-        status.textContent = '';
-      }
-      
-    } catch (error) {
-      console.error('Error loading accounts:', error);
-      status.textContent = 'Error loading accounts: ' + error.message;
-      status.className = 'error';
-      currentAccount = null;
-      classifyButton.disabled = true;
-      moveButton.disabled = true;
-    } finally {
-      refreshButton.disabled = false;
-      refreshButton.textContent = '↻'; // Reset button state
-    }
-  }
+  const archiveButton = document.getElementById('archiveConfidentButton');
+  const reclassifyButton = document.getElementById('reclassifyButton');
+  const threshold = getConfidenceThreshold();
 
-  // Load accounts initially
-  await loadAccounts();
+  isClassifying = true;
+  archiveButton.disabled = true;
+  reclassifyButton.disabled = true;
+  status.textContent = `Classifying 0 / ${messages.length}…`;
+  status.className = '';
 
-  // Add refresh button handler
-  refreshButton.addEventListener('click', async () => {
-    await loadAccounts();
-    status.textContent = 'Account list refreshed';
-    status.className = 'success';
-  });
+  try {
+    let failed = 0;
+    const total = messages.length;
 
-  // Account selection handler
-  accountSelect.addEventListener('change', async () => {
-    const accountId = accountSelect.value;
-    if (!accountId) {
-      currentAccount = null;
-      return;
-    }
-    
-    try {
-      const accounts = await browser.accounts.list();
-      currentAccount = accounts.find(a => a.id === accountId);
-      
-      if (!currentAccount) {
-        throw new Error('Selected account not found');
-      }
-      
-      classifyButton.disabled = false;
-      moveButton.disabled = true;
-      await loadInboxMessages();
-      
-    } catch (error) {
-      console.error('Error selecting account:', error);
-      status.textContent = 'Error selecting account: ' + error.message;
-      status.className = 'error';
-      currentAccount = null;
-      classifyButton.disabled = true;
-      moveButton.disabled = true;
-    }
-  });
-  
-  // Select all checkbox handler
-  selectAll.addEventListener('change', () => {
-    const checkboxes = messageList.querySelectorAll('input[type="checkbox"]');
-    checkboxes.forEach(checkbox => checkbox.checked = selectAll.checked);
-    updateMoveButton();
-  });
-  
-  // Update confidence value display
-  confidenceSlider.addEventListener('input', () => {
-    confidenceValue.textContent = `${confidenceSlider.value}%`;
-  });
-  
-  // Add sort handlers
-  const headers = document.querySelectorAll('th[data-sort]');
-  headers.forEach(header => {
-    header.addEventListener('click', () => {
-      const field = header.dataset.sort;
-      const ascending = header.dataset.order !== 'asc';
-      
-      // Update sort indicators
-      headers.forEach(h => {
-        h.dataset.order = h === header ? (ascending ? 'asc' : 'desc') : '';
+    for (let start = 0; start < total; start += CLASSIFY_BATCH_SIZE) {
+      const batch = messages.slice(start, start + CLASSIFY_BATCH_SIZE);
+      const batchResults = await emailArchiveRequest('classifyMessages', {
+        accountId: currentAccount.id,
+        messageIds: batch.map(m => m.id)
       });
-      
-      sortMessages(field, ascending);
-    });
-  });
-  
-  // Handle classify button click
-  classifyButton.addEventListener('click', async () => {
-    if (!currentAccount) return;
-    
-    const background = await browser.runtime.getBackgroundPage();
-    const status = document.getElementById('status');
-    const confidenceThreshold = parseInt(confidenceSlider.value);
-    const rows = messageList.getElementsByTagName('tr');
-    
-    try {
-      status.textContent = 'Classifying messages...';
-      status.className = '';
-      classifyButton.disabled = true;
-      moveButton.disabled = true;
-      
-      // Get selected messages
-      const selectedCheckboxes = messageList.querySelectorAll('input[type="checkbox"]:checked');
-      if (selectedCheckboxes.length === 0) {
-        status.textContent = 'Please select messages to classify';
-        status.className = 'warning';
-        classifyButton.disabled = false;
-        return;
-      }
-      
-      // Verify trained model exists
-      const trainedAccounts = await background.emailArchive.getTrainedAccounts();
-      if (!trainedAccounts.includes(currentAccount.id)) {
-        throw new Error('No trained model found for this account');
-      }
-      
-      // Classify selected messages
-      for (let index = 0; index < messages.length; index++) {
-        const checkbox = rows[index].querySelector('input[type="checkbox"]');
-        if (!checkbox || !checkbox.checked) continue;
-        
-        const message = messages[index];
-        try {
-          const prediction = await background.emailArchive.classifyMessage(message, currentAccount.id);
-          
-          // Store the prediction in the message object
-          message.predictedFolder = prediction.folder;
-          message.confidence = prediction.confidence;
-          
-          // Update the UI
-          const targetCell = rows[index].querySelector('.target-folder');
-          const confidenceCell = rows[index].querySelector('.confidence-value');
-          
-          targetCell.textContent = prediction.folder;
-          confidenceCell.textContent = `${prediction.confidence.toFixed(1)}%`;
-          confidenceCell.className = `confidence-value ${getConfidenceClass(prediction.confidence)}`;
-          
-          if (prediction.confidence < confidenceThreshold) {
-            targetCell.classList.add('low-confidence');
-          } else {
-            targetCell.classList.remove('low-confidence');
+
+      batchResults.forEach((result, batchIndex) => {
+        const index = start + batchIndex;
+        if (result.error || !result.folder) {
+          failed++;
+          const rows = document.getElementById('messageList').getElementsByTagName('tr');
+          const targetCell = rows[index]?.querySelector('.target-folder');
+          if (targetCell) {
+            targetCell.textContent = result.error ? 'Failed' : '';
+            targetCell.classList.add('error');
           }
-        } catch (error) {
-          console.error(`Error classifying message ${message.id}:`, error);
-          const targetCell = rows[index].querySelector('.target-folder');
-          targetCell.textContent = 'Classification failed';
-          targetCell.classList.add('error');
+        } else {
+          applyPredictionToRow(index, result, threshold);
         }
-      }
-      
-      status.textContent = 'Classification complete.';
-      status.className = 'success';
-      moveButton.disabled = false;
-      
-    } catch (error) {
-      console.error('Classification error:', error);
-      status.textContent = 'Error classifying messages: ' + error.message;
-      status.className = 'error';
-    } finally {
-      classifyButton.disabled = false;
-    }
-  });
-  
-  // Handle move button
-  moveButton.addEventListener('click', async () => {
-    if (!currentAccount) return;
-    
-    const confidenceThreshold = parseInt(confidenceSlider.value);
-    const checkboxes = messageList.querySelectorAll('input[type="checkbox"]');
-    const selectedMessages = Array.from(checkboxes)
-      .map((checkbox, index) => checkbox.checked ? messages[index] : null)
-      .filter(message => message && message.confidence >= confidenceThreshold);
-    
-    if (selectedMessages.length === 0) {
-      status.textContent = 'No messages selected with confidence above threshold.';
-      status.className = 'error';
-      return;
+      });
+
+      status.textContent =
+        `Classifying ${Math.min(start + batch.length, total)} / ${total} (embedding match per message)…`;
     }
 
-    const totalSelected = Array.from(checkboxes).filter(cb => cb.checked).length;
-    const skippedCount = totalSelected - selectedMessages.length;
-    
-    status.textContent = 'Moving messages...';
-    status.className = '';
-    moveButton.disabled = true;
-    
-    try {
-      const background = await browser.runtime.getBackgroundPage();
-      const results = await background.emailArchive.moveMessages(currentAccount.id, selectedMessages);
-      await loadInboxMessages();
-      
-      // Process results
-      const successCount = results.reduce((sum, r) => sum + (r.success ? r.count : 0), 0);
-      const copyCount = results.reduce((sum, r) => sum + (r.success && r.copied ? r.count : 0), 0);
-      const failCount = results.reduce((sum, r) => sum + (!r.success ? r.count : 0), 0);
-      
-      let statusMessage = [];
-      if (successCount > 0) {
-        if (copyCount > 0) {
-          statusMessage.push(`${copyCount} messages copied (could not be moved)`);
-          successCount -= copyCount;
-        }
-        if (successCount > 0) {
-          statusMessage.push(`${successCount} messages moved`);
-        }
-      }
-      if (failCount > 0) {
-        statusMessage.push(`${failCount} messages failed to move`);
-      }
-      if (skippedCount > 0) {
-        statusMessage.push(`${skippedCount} messages skipped due to low confidence`);
-      }
-      
-      status.textContent = statusMessage.join('. ');
-      status.className = failCount > 0 ? 'warning' : 'success';
-      
-    } catch (error) {
-      console.error('Move error:', error);
-      status.textContent = 'Error moving messages: ' + error.message;
-      status.className = 'error';
-    } finally {
-      moveButton.disabled = false;
-    }
-  });
-});
+    status.textContent = failed
+      ? `Classification done. ${failed} of ${total} failed (is Ollama running?).`
+      : `Classification complete for ${total} message(s).`;
+    status.className = failed ? 'warning' : 'success';
+  } catch (error) {
+    console.error('Classification error:', error);
+    status.textContent = `Error: ${error.message}`;
+    status.className = 'error';
+  } finally {
+    isClassifying = false;
+    updateActionButtons();
+  }
+}
 
-// Load inbox messages for selected account
 async function loadInboxMessages() {
   const messageList = document.getElementById('messageList');
   const status = document.getElementById('status');
-  
+
   if (!currentAccount) {
     messageList.innerHTML = '<tr><td colspan="6">Please select an account</td></tr>';
-    status.textContent = 'No account selected';
-    status.className = 'warning';
     return;
   }
-  
+
   try {
-    status.textContent = 'Loading messages...';
-    status.className = '';
-    messageList.innerHTML = '';
+    status.textContent = 'Loading messages…';
     messages = [];
-    
-    // Get all folders for the account
+
     const folders = await browser.folders.query({
       accountId: currentAccount.id,
       specialUse: ['inbox']
     });
-    
-    if (!folders || folders.length === 0) {
-      throw new Error('Inbox folder not found');
-    }
-    
-    const inbox = folders[0];
-    let page = await browser.messages.list(inbox.id);
-    
-    if (!page || !page.messages) {
-      messageList.innerHTML = '<tr><td colspan="6">No messages in Inbox</td></tr>';
-      status.textContent = 'Inbox is empty';
-      status.className = 'warning';
-      return;
-    }
-    
-    // Process first page
-    messages = [...page.messages];
-    
-    // Get remaining pages if they exist
-    while (page.id) {
-      page = await browser.messages.continueList(page.id);
-      if (page && page.messages) {
-        messages = [...messages, ...page.messages];
+    if (!folders?.length) throw new Error('Inbox folder not found');
+
+    let page = await browser.messages.list(folders[0].id);
+    while (page) {
+      if (page.messages?.length) {
+        messages.push(...page.messages);
       }
+      page = page.id ? await browser.messages.continueList(page.id) : null;
     }
-    
+
     if (messages.length === 0) {
       messageList.innerHTML = '<tr><td colspan="6">No messages in Inbox</td></tr>';
       status.textContent = 'Inbox is empty';
       status.className = 'warning';
       return;
     }
-    
-    // Clear existing content and add messages
-    messageList.innerHTML = '';
-    messages.forEach((message, index) => {
-      const row = document.createElement('tr');
-      row.dataset.messageId = message.id;
-      
-      // Initialize confidence variables
-      const confidenceClass = message.confidence ? 
-        getConfidenceClass(message.confidence) : '';
-      const confidenceDisplay = message.confidence ? 
-        `${message.confidence.toFixed(1)}%` : '';
-      
-      row.innerHTML = `
-        <td><input type="checkbox" data-index="${index}"></td>
-        <td class="col-date">${new Date(message.date).toLocaleDateString()}</td>
-        <td class="col-from">${escapeHtml(message.author || '')}</td>
-        <td class="col-subject">${escapeHtml(message.subject || '')}</td>
-        <td class="col-confidence confidence-value ${confidenceClass}">${confidenceDisplay}</td>
-        <td class="col-target target-folder">${message.predictedFolder || ''}</td>
-      `;
-      
-      messageList.appendChild(row);
-    });
-    
-    // Add change listeners to checkboxes
-    const checkboxes = messageList.querySelectorAll('input[type="checkbox"]');
-    checkboxes.forEach(checkbox => {
-      checkbox.addEventListener('change', updateMoveButton);
-    });
-    
-    // Update status
-    status.textContent = `Loaded ${messages.length} messages from Inbox`;
-    status.className = 'success';
-    
+
+    updateTable();
+    status.textContent =
+      `Loaded ${messages.length} messages. Classifying by similarity to your index…`;
+    await classifyAllMessages();
   } catch (error) {
     console.error('Error loading messages:', error);
     messageList.innerHTML = '<tr><td colspan="6">Error loading messages</td></tr>';
@@ -460,98 +214,259 @@ async function loadInboxMessages() {
   }
 }
 
-// Update move button state
-function updateMoveButton() {
-  const hasClassified = document.querySelector('.target-folder:not(:empty)');
-  const hasSelected = document.querySelector('input[type="checkbox"]:checked');
-  moveButton.disabled = !(hasClassified && hasSelected);
+function updateActionButtons() {
+  const archiveButton = document.getElementById('archiveConfidentButton');
+  const moveButton = document.getElementById('moveSelectedButton');
+  const threshold = getConfidenceThreshold();
+  const hasPredictions = messages.some(m => m.predictedFolder);
+  const confidentCount = messages.filter(
+    m => m.predictedFolder && m.confidence >= threshold
+  ).length;
+  const selectedClassified = document.querySelector(
+    'input[type="checkbox"]:checked'
+  ) && messages.some((m, i) => {
+    const cb = document.querySelector(`input[data-index="${i}"]`);
+    return cb?.checked && m.predictedFolder;
+  });
+
+  archiveButton.disabled = isClassifying || confidentCount === 0;
+  moveButton.disabled = isClassifying || !selectedClassified;
 }
 
-// Helper function to escape HTML
 function escapeHtml(unsafe) {
   return (unsafe || '')
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
 
-// Refresh accounts when page becomes visible
-document.addEventListener('visibilitychange', async () => {
-  if (document.visibilityState === 'visible') {
-    await loadAccounts();
-  }
-});
-
-// Add column resizing
 function initializeColumnResizing() {
-  const table = document.querySelector('table');
-  const headers = table.querySelectorAll('th');
-  
+  const headers = document.querySelectorAll('table th');
   headers.forEach(header => {
-    // Create resizer element
+    if (header.querySelector('.resizer')) return;
     const resizer = document.createElement('div');
     resizer.className = 'resizer';
     header.appendChild(resizer);
-    let startX, startWidth;
-    
+    let startX;
+    let startWidth;
+
     resizer.addEventListener('pointerdown', e => {
       startX = e.pageX;
       startWidth = header.offsetWidth;
-      
-      // Set pointer capture to track pointer movements even outside the element
       resizer.setPointerCapture(e.pointerId);
-      
-      const pointerMoveHandler = e => {
-        if (e.buttons === 0) {
-          // Button was released outside the window
-          cleanup();
-          return;
-        }
-        const width = startWidth + (e.pageX - startX);
-        header.style.width = `${width}px`;
+
+      const onMove = ev => {
+        if (ev.buttons === 0) return cleanup();
+        header.style.width = `${startWidth + (ev.pageX - startX)}px`;
       };
-      
       const cleanup = () => {
-        resizer.removeEventListener('pointermove', pointerMoveHandler);
-        resizer.removeEventListener('pointerup', pointerUpHandler);
+        resizer.removeEventListener('pointermove', onMove);
+        resizer.removeEventListener('pointerup', cleanup);
         if (resizer.hasPointerCapture(e.pointerId)) {
           resizer.releasePointerCapture(e.pointerId);
         }
       };
-      
-      const pointerUpHandler = () => {
-        cleanup();
-      };
-      
-      resizer.addEventListener('pointermove', pointerMoveHandler);
-      resizer.addEventListener('pointerup', pointerUpHandler);
-      resizer.addEventListener('pointercancel', cleanup);
+      resizer.addEventListener('pointermove', onMove);
+      resizer.addEventListener('pointerup', cleanup);
     });
   });
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
-  const messageList = document.getElementById('messageList');
   const accountSelect = document.getElementById('accountSelect');
-  const classifyButton = document.getElementById('classifyButton');
-  const moveButton = document.getElementById('moveButton');
+  const refreshButton = document.getElementById('refreshAccounts');
+  const archiveButton = document.getElementById('archiveConfidentButton');
+  const reclassifyButton = document.getElementById('reclassifyButton');
+  const moveButton = document.getElementById('moveSelectedButton');
+  const selectAll = document.getElementById('selectAll');
   const status = document.getElementById('status');
   const confidenceSlider = document.getElementById('confidenceSlider');
   const confidenceValue = document.getElementById('confidenceValue');
-  
-  // Listen for training complete message
-  browser.runtime.onMessage.addListener(async (message) => {
-    if (message.type === 'training-complete') {
-      console.log('Training complete, refreshing accounts');
-      await loadAccounts();
+  const ollamaStatus = document.getElementById('ollamaStatus');
+
+  async function updateOllamaStatus() {
+    try {
+      const stored = await emailArchiveRequest('getOllamaSettings');
+      await fetchOllamaTags(stored.baseUrl);
+      ollamaStatus.textContent = `Ollama: ${stored.chatModel} + ${stored.embedModel}`;
+      ollamaStatus.className = 'ollama-status ok';
+    } catch (error) {
+      ollamaStatus.textContent = `Ollama: ${error.message}`;
+      ollamaStatus.className = 'ollama-status error';
+    }
+  }
+
+  async function loadAccounts() {
+    try {
+      refreshButton.disabled = true;
+      refreshButton.textContent = '⌛';
+      const accounts = await browser.accounts.list();
+      const trainedAccounts = await emailArchiveRequest('getTrainedAccounts');
+
+      accountSelect.innerHTML = '<option value="">Select Account</option>';
+      for (const account of accounts) {
+        if (trainedAccounts.includes(account.id)) {
+          const option = document.createElement('option');
+          option.value = account.id;
+          option.textContent = account.name;
+          accountSelect.appendChild(option);
+        }
+      }
+
+      if (currentAccount && trainedAccounts.includes(currentAccount.id)) {
+        accountSelect.value = currentAccount.id;
+      } else {
+        currentAccount = null;
+        accountSelect.value = '';
+      }
+    } catch (error) {
+      status.textContent = `Error loading accounts: ${error.message}`;
+      status.className = 'error';
+    } finally {
+      refreshButton.disabled = false;
+      refreshButton.textContent = '↻';
+    }
+  }
+
+  await updateOllamaStatus();
+  await loadAccounts();
+
+  refreshButton.addEventListener('click', async () => {
+    await loadAccounts();
+    await updateOllamaStatus();
+    status.textContent = 'Account list refreshed';
+    status.className = 'success';
+  });
+
+  accountSelect.addEventListener('change', async () => {
+    const accountId = accountSelect.value;
+    if (!accountId) {
+      currentAccount = null;
+      return;
+    }
+    const accounts = await browser.accounts.list();
+    currentAccount = accounts.find(a => a.id === accountId);
+    if (!currentAccount) return;
+    await loadInboxMessages();
+  });
+
+  selectAll.addEventListener('change', () => {
+    document.querySelectorAll('#messageList input[type="checkbox"]').forEach(cb => {
+      cb.checked = selectAll.checked;
+    });
+    updateActionButtons();
+  });
+
+  confidenceSlider.addEventListener('input', () => {
+    confidenceValue.textContent = `${confidenceSlider.value}%`;
+    updateTable();
+  });
+
+  document.querySelectorAll('th[data-sort]').forEach(header => {
+    header.addEventListener('click', () => {
+      const field = header.dataset.sort;
+      const ascending = header.dataset.order !== 'asc';
+      document.querySelectorAll('th[data-sort]').forEach(h => {
+        h.dataset.order = h === header ? (ascending ? 'asc' : 'desc') : '';
+      });
+      sortMessages(field, ascending);
+    });
+  });
+
+  archiveButton.addEventListener('click', async () => {
+    if (!currentAccount) return;
+    const threshold = getConfidenceThreshold();
+    const toMove = messages.filter(
+      m => m.predictedFolder && m.confidence >= threshold
+    );
+    if (toMove.length === 0) {
+      status.textContent = 'No messages meet the confidence threshold.';
+      status.className = 'warning';
+      return;
+    }
+
+    archiveButton.disabled = true;
+    status.textContent = `Archiving ${toMove.length} message(s)…`;
+    try {
+      const results = await emailArchiveRequest('moveMessages', {
+        accountId: currentAccount.id,
+        messages: toMove.map(m => ({
+          id: m.id,
+          predictedFolder: m.predictedFolder
+        }))
+      });
+      const successCount = results.filter(r => r.success).length;
+      const failCount = results.length - successCount;
+      await loadInboxMessages();
+      status.textContent = failCount
+        ? `Archived ${successCount}. ${failCount} failed.`
+        : `Archived ${successCount} message(s).`;
+      status.className = failCount ? 'warning' : 'success';
+    } catch (error) {
+      status.textContent = `Error: ${error.message}`;
+      status.className = 'error';
+      archiveButton.disabled = false;
     }
   });
-  
-  // Update confidence threshold display
-  confidenceSlider.addEventListener('input', () => {
-    confidenceValue.textContent = confidenceSlider.value + '%';
-    updateMoveButton();
+
+  reclassifyButton.addEventListener('click', classifyAllMessages);
+
+  moveButton.addEventListener('click', async () => {
+    if (!currentAccount) return;
+    const threshold = getConfidenceThreshold();
+    const checkboxes = document.querySelectorAll('#messageList input[type="checkbox"]');
+    const selectedMessages = [];
+    checkboxes.forEach((checkbox, index) => {
+      if (checkbox.checked && messages[index]?.predictedFolder
+          && messages[index].confidence >= threshold) {
+        selectedMessages.push(messages[index]);
+      }
+    });
+
+    if (selectedMessages.length === 0) {
+      status.textContent = 'Select classified messages above the confidence threshold.';
+      status.className = 'warning';
+      return;
+    }
+
+    moveButton.disabled = true;
+    try {
+      await emailArchiveRequest('moveMessages', {
+        accountId: currentAccount.id,
+        messages: selectedMessages.map(m => ({
+          id: m.id,
+          predictedFolder: m.predictedFolder
+        }))
+      });
+      await loadInboxMessages();
+      status.textContent = `Moved ${selectedMessages.length} selected message(s).`;
+      status.className = 'success';
+    } catch (error) {
+      status.textContent = `Error: ${error.message}`;
+      status.className = 'error';
+    } finally {
+      updateActionButtons();
+    }
+  });
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) {
+      return;
+    }
+    const message = event.data;
+    if (message.type === 'classification-progress') {
+      status.textContent = `Classifying ${message.current} / ${message.total}…`;
+    } else if (message.type === 'training-complete') {
+      loadAccounts();
+    }
+  });
+
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState === 'visible') {
+      await loadAccounts();
+      await updateOllamaStatus();
+    }
   });
 });

@@ -3,7 +3,6 @@
 <head>
     <meta charset="utf-8">
     <title>Email Archive Assistant - Training</title>
-    <link rel="stylesheet" type="text/css" href="train.css">
     <style>
     body {
       font-family: system-ui, -apple-system, sans-serif;
@@ -111,6 +110,51 @@
     .sync-status {
       font-style: italic;
       color: #666;
+      margin-bottom: 12px;
+    }
+
+    .sync-status.success { color: #1b4332; }
+    .sync-status.error {
+      color: #862e2e;
+      font-style: normal;
+      white-space: pre-wrap;
+    }
+
+    .model-picker {
+      margin: 16px 0;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+
+    .model-picker h3 {
+      margin: 0 0 12px;
+      font-size: 1em;
+    }
+
+    .model-picker label {
+      display: block;
+      margin: 8px 0 4px;
+      font-size: 0.9em;
+      color: #444;
+    }
+
+    .model-picker-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .model-picker-row select,
+    .model-picker-row input[type="url"] {
+      flex: 1;
+      margin: 0;
+    }
+
+    .model-picker-row button {
+      width: auto;
+      margin: 0;
+      white-space: nowrap;
     }
   </style>
 </head>
@@ -127,21 +171,62 @@
     
     <button id="selectAllFolders">Select All</button>
     <button id="deselectAllFolders">Deselect All</button>
-    <button id="trainButton">Start Training</button>
+    <button id="trainButton">Build archive index</button>
   </div>
   
   <div class="main-content">
     <h2>Email Archive Assistant - Training</h2>
+    <p>Indexes messages in your archive folders (via Ollama + embeddings) so the Archive tab can suggest destinations.</p>
+    <p class="sync-status">Ollama must allow Thunderbird: start with <code>OLLAMA_ORIGINS="moz-extension://*" ollama serve</code> (see readme).</p>
+    <p class="sync-status" id="indexingHint">Indexing samples messages per selected folder (all folders are covered; large mailboxes may take a while).</p>
+    <div id="ollamaStatus" class="sync-status"></div>
+
+    <div class="model-picker">
+      <h3>Ollama connection</h3>
+      <label for="ollamaBaseUrl">API URL</label>
+      <div class="model-picker-row">
+        <input type="url" id="ollamaBaseUrl" placeholder="http://127.0.0.1:11434"
+               aria-label="Ollama API base URL">
+        <button type="button" id="applyBaseUrlButton">Apply</button>
+        <button type="button" id="testConnectionButton">Test connection</button>
+      </div>
+      <h3>Ollama models</h3>
+      <label for="chatModelSelect">Classification (chat)</label>
+      <div class="model-picker-row">
+        <select id="chatModelSelect" aria-label="Chat model for classification">
+          <option value="">Loading models…</option>
+        </select>
+      </div>
+      <label for="embedModelSelect">Embeddings (indexing)</label>
+      <div class="model-picker-row">
+        <select id="embedModelSelect" aria-label="Embedding model for indexing">
+          <option value="">Loading models…</option>
+        </select>
+        <button type="button" id="refreshModelsButton" title="Reload model list from Ollama">Refresh</button>
+      </div>
+      <h3>Index size</h3>
+      <label for="maxSamplesPerFolder">Messages per folder (when building index)</label>
+      <div class="model-picker-row">
+        <input type="number" id="maxSamplesPerFolder" min="1" max="100" step="1"
+               aria-label="Maximum messages to index per archive folder">
+      </div>
+      <label for="maxTotalIndexEntries">Max total indexed messages (0 = no limit)</label>
+      <div class="model-picker-row">
+        <input type="number" id="maxTotalIndexEntries" min="0" max="50000" step="100"
+               aria-label="Optional cap on total indexed messages across all folders">
+      </div>
+      <p class="sync-status" id="indexCapHint"></p>
+    </div>
     
     <div class="models-list">
-      <h3>Trained Models</h3>
+      <h3>Indexed accounts</h3>
       <div id="modelsList">
         <!-- Models will be listed here -->
       </div>
     </div>
     
     <div class="progress-box">
-      <h3>Training Progress</h3>
+      <h3>Indexing progress</h3>
       <div id="folderProgress">
         Folders: <span id="folderCount">-</span>
       </div>
@@ -154,6 +239,8 @@
     <div id="status"></div>
   </div>
 
+  <script src="bg-api.js"></script>
+  <script src="ollama-client.js"></script>
   <script src="train.js"></script>
 </body>
 </html> 
