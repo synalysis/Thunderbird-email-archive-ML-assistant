@@ -6,6 +6,35 @@ const MAX_CONTEXT_MENU_FOLDERS = 25;
 
 let learnFolderPathsForMenu = [];
 let folderPickerPending = null;
+const archiveFoldersCache = new Map();
+const folderIdCache = new Map();
+const pickerPreloadCache = new Map();
+const pickerPreloadInFlight = new Set();
+const inboxOrderCache = new Map();
+const PICKER_PRELOAD_TTL_MS = 180000;
+const INBOX_ORDER_CACHE_TTL_MS = 300000;
+const PICKER_PRELOAD_WAIT_MS = 5000;
+
+function invalidateArchiveFoldersCache(accountId) {
+  if (accountId) {
+    archiveFoldersCache.delete(accountId);
+  } else {
+    archiveFoldersCache.clear();
+  }
+}
+
+async function resolveFolderId(accountId, folderPath) {
+  const key = `${accountId}|${folderPath}`;
+  if (folderIdCache.has(key)) {
+    return folderIdCache.get(key);
+  }
+  const folders = await browser.folders.query({ accountId, path: folderPath });
+  if (!folders?.length) {
+    throw new Error(`Target folder ${folderPath} not found`);
+  }
+  folderIdCache.set(key, folders[0].id);
+  return folders[0].id;
+}
 
 function messagesFromList(messageList) {
   if (!messageList?.messages?.length) {
@@ -58,6 +87,10 @@ function sortFoldersByScore(folders) {
 }
 
 async function getSelectableArchiveFolders(accountId) {
+  const cached = archiveFoldersCache.get(accountId);
+  if (cached && Date.now() - cached.at < 120000) {
+    return cached.folders;
+  }
   const paths = new Set();
   try {
     const index = await loadIndex(accountId);
@@ -87,7 +120,9 @@ async function getSelectableArchiveFolders(accountId) {
     const nameB = (b.split('/').pop() || b).toLowerCase();
     return nameA.localeCompare(nameB);
   });
-  return sorted.map(path => ({ path, score: 0 }));
+  const folders = sorted.map(path => ({ path, score: 0 }));
+  archiveFoldersCache.set(accountId, { folders, at: Date.now() });
+  return folders;
 }
 
 async function getFoldersForContextMenu(accountId, messages) {
@@ -104,10 +139,10 @@ async function getFoldersForContextMenu(accountId, messages) {
     })));
   }
   try {
-    const settings = await ollamaArchive.getOllamaSettings();
-    await ollamaArchive.checkOllamaEmbedAvailable(settings);
+    const settings = await llamaArchive.getLlamaSettings();
+    await llamaArchive.checkLlamaEmbedAvailable(settings);
     const index = await loadIndex(accountId);
-    const ranked = await ollamaArchive.rankFoldersForMessage(
+    const ranked = await llamaArchive.rankFoldersForMessage(
       index,
       messages[0].id,
       paths,
@@ -133,13 +168,12 @@ async function ensureIndex(accountId) {
   try {
     return await loadIndex(accountId);
   } catch (_) {
-    const settings = await ollamaArchive.getOllamaSettings();
+    const settings = await llamaArchive.getLlamaSettings();
     return {
       version: 1,
       accountId,
       updatedAt: Date.now(),
       settings: {
-        chatModel: settings.chatModel,
         embedModel: settings.embedModel
       },
       entries: []
@@ -148,25 +182,50 @@ async function ensureIndex(accountId) {
 }
 
 async function addLearnedEntry(index, messageId, folderPath, settings) {
-  const content = await ollamaArchive.getMessageContent(
-    messageId,
-    settings.bodyPreviewLength
-  );
-  const embedText = ollamaArchive.buildEmbedText({
-    author: content.author,
-    subject: content.subject,
-    bodyPreview: content.bodyPreview
-  });
-  const embedding = await ollamaArchive.embedText(embedText, settings);
+  const cached = llamaArchive.getMessageEmbeddingCache(messageId);
+  let content;
+  let embedding;
+  if (cached) {
+    content = cached.content;
+    embedding = cached.embedding;
+  } else {
+    content = await llamaArchive.getMessageContent(
+      messageId,
+      settings.bodyPreviewLength
+    );
+    const embedText = llamaArchive.buildEmbedText({
+      author: content.author,
+      recipients: content.recipients,
+      subject: content.subject,
+      bodyPreview: content.bodyPreview
+    });
+    embedding = await llamaArchive.embedText(embedText, settings);
+  }
   index.entries = index.entries.filter(entry => entry.messageId !== messageId);
   index.entries.push({
     messageId,
     folderPath,
     author: content.author,
+    recipients: content.recipients,
     subject: content.subject,
     bodyPreview: content.bodyPreview,
     embedding
   });
+  trimLearnedEntriesForFolder(index, folderPath, settings.maxSamplesPerFolder);
+}
+
+function trimLearnedEntriesForFolder(index, folderPath, maxPerFolder) {
+  const cap = parseInt(maxPerFolder, 10);
+  if (!Number.isFinite(cap) || cap < 1) {
+    return;
+  }
+  const folderEntries = index.entries.filter(entry => entry.folderPath === folderPath);
+  if (folderEntries.length <= cap) {
+    return;
+  }
+  const dropCount = folderEntries.length - cap;
+  const dropIds = new Set(folderEntries.slice(0, dropCount).map(entry => entry.messageId));
+  index.entries = index.entries.filter(entry => !dropIds.has(entry.messageId));
 }
 
 async function accountIdFromMessageHeader(message) {
@@ -188,43 +247,55 @@ async function accountIdFromMessageHeader(message) {
   return folder.accountId;
 }
 
-async function learnAndMoveMessages(accountId, messageIds, folderPath, notify = true) {
+async function updateIndexFromMoves(accountId, messageIds, folderPath) {
+  if (!messageIds.length) {
+    return;
+  }
+  const settings = await llamaArchive.getLlamaSettings();
+  await llamaArchive.checkLlamaEmbedAvailable(settings);
+  let index = await ensureIndex(accountId);
+  for (const messageId of messageIds) {
+    await addLearnedEntry(index, messageId, folderPath, settings);
+  }
+  index.updatedAt = Date.now();
+  await saveIndex(accountId, index);
+}
+
+async function learnAndMoveMessages(accountId, messageIds, folderPath, notify = true, options = {}) {
+  const { backgroundLearn = false } = options;
   if (!accountId || !folderPath || !messageIds?.length) {
     throw new Error('No message or folder selected.');
   }
 
-  const settings = await ollamaArchive.getOllamaSettings();
-  await ollamaArchive.checkOllamaAvailable(settings);
-  let index = await ensureIndex(accountId);
-  let moved = 0;
-  let learned = 0;
+  const moveResults = await moveMessages(
+    accountId,
+    messageIds.map(id => ({ id, predictedFolder: folderPath }))
+  );
+  const movedIds = moveResults.filter(result => result.success).map(result => result.messageId);
+  const moved = movedIds.length;
 
-  for (const messageId of messageIds) {
-    await addLearnedEntry(index, messageId, folderPath, settings);
-    learned++;
-    const results = await moveMessages(accountId, [{
-      id: messageId,
-      predictedFolder: folderPath
-    }]);
-    if (results[0]?.success) {
-      moved++;
-    }
+  const learnTask = () => updateIndexFromMoves(accountId, movedIds, folderPath);
+  if (backgroundLearn) {
+    learnTask().catch(error => {
+      console.error('Background index update failed:', error);
+    });
+  } else {
+    await learnTask();
   }
-
-  index.updatedAt = Date.now();
-  await saveIndex(accountId, index);
 
   const folderName = folderPath.split('/').pop() || folderPath;
   let summary;
   if (moved === messageIds.length) {
-    summary = `Moved ${moved} message(s) to ${folderName} and updated the index.`;
+    summary = backgroundLearn
+      ? `Moved ${moved} message(s) to ${folderName}.`
+      : `Moved ${moved} message(s) to ${folderName} and updated the index.`;
   } else {
-    summary = `Learned ${learned} example(s) for ${folderName}. Moved ${moved} of ${messageIds.length}.`;
+    summary = `Moved ${moved} of ${messageIds.length} to ${folderName}.`;
   }
   if (notify) {
     await notifyUser(summary);
   }
-  return { moved, learned, total: messageIds.length, summary };
+  return { moved, learned: moved, total: messageIds.length, summary };
 }
 
 async function learnAndMoveFromContext(info, folderPath) {
@@ -298,12 +369,212 @@ async function listRankedFolders(accountId, messageId) {
   };
 }
 
-const FOLDER_PICKER_ADVANCE_MS = 150;
-const FOLDER_PICKER_ADVANCE_ATTEMPTS = 12;
+async function buildPickerStateForMessages(accountId, messages) {
+  const folders = await getFoldersForContextMenu(accountId, messages);
+  const ranked = folders.some(f => (Number(f.score) || 0) > 0);
+  const rankingError = folders.find(f => f.rankingError)?.rankingError || null;
+  return {
+    close: false,
+    accountId,
+    messageIds: messages.map(m => m.id),
+    folders,
+    ranked,
+    rankingError
+  };
+}
 
-async function refreshFolderPickerAfterMove(movedMessageIds) {
-  const moved = new Set(movedMessageIds || []);
-  for (let attempt = 0; attempt < FOLDER_PICKER_ADVANCE_ATTEMPTS; attempt++) {
+async function getInboxMessageIds(accountId) {
+  const cached = inboxOrderCache.get(accountId);
+  if (cached && Date.now() - cached.at < INBOX_ORDER_CACHE_TTL_MS) {
+    return cached.ids;
+  }
+  const folders = await browser.folders.query({
+    accountId,
+    specialUse: ['inbox']
+  });
+  if (!folders?.length) {
+    return [];
+  }
+  const ids = [];
+  let page = await browser.messages.list(folders[0].id);
+  while (page) {
+    for (const msg of page.messages || []) {
+      ids.push(msg.id);
+    }
+    page = page.id ? await browser.messages.continueList(page.id) : null;
+  }
+  inboxOrderCache.set(accountId, { ids, at: Date.now() });
+  return ids;
+}
+
+function removeMessagesFromInboxOrderCache(accountId, messageIds) {
+  const cached = inboxOrderCache.get(accountId);
+  if (!cached) {
+    return;
+  }
+  const moved = new Set(messageIds);
+  cached.ids = cached.ids.filter(id => !moved.has(id));
+}
+
+function resolveNextInboxMessageId(accountId, currentMessageId) {
+  const cached = inboxOrderCache.get(accountId);
+  if (!cached?.ids?.length || !currentMessageId) {
+    return null;
+  }
+  const idx = cached.ids.indexOf(currentMessageId);
+  if (idx < 0 || idx >= cached.ids.length - 1) {
+    return null;
+  }
+  return cached.ids[idx + 1];
+}
+
+async function guessNextInboxMessageId(accountId, currentMessageId) {
+  await getInboxMessageIds(accountId);
+  return resolveNextInboxMessageId(accountId, currentMessageId);
+}
+
+async function resolveNextInboxMessageIdAfterMove(accountId, movedMessageId, movedMessageIds) {
+  await getInboxMessageIds(accountId);
+  const nextId = resolveNextInboxMessageId(accountId, movedMessageId);
+  removeMessagesFromInboxOrderCache(accountId, movedMessageIds);
+  return nextId;
+}
+
+async function buildQuickPickerState(accountId, messageId) {
+  const folders = await getSelectableArchiveFolders(accountId);
+  const paths = folders.map(f => f.path);
+  return {
+    close: false,
+    accountId,
+    messageIds: [messageId],
+    folders: sortFoldersByScore(paths.map(path => ({
+      path,
+      score: 0,
+      title: formatFolderMenuTitle(path, paths, 0)
+    }))),
+    ranked: false,
+    rankingError: null
+  };
+}
+
+function rankAndNotifyPicker(accountId, messageId) {
+  (async () => {
+    try {
+      const state = await buildPickerStateForMessages(accountId, [{ id: messageId }]);
+      pickerPreloadCache.set(messageId, { state, at: Date.now() });
+      schedulePickerPreload(accountId, messageId);
+      await browser.runtime.sendMessage({
+        type: 'picker-state-update',
+        state
+      });
+    } catch (error) {
+      console.warn('Picker rank update failed:', error);
+    }
+  })();
+}
+
+async function waitForPickerPreload(messageId, maxMs = PICKER_PRELOAD_WAIT_MS) {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    const entry = pickerPreloadCache.get(messageId);
+    if (entry && Date.now() - entry.at < PICKER_PRELOAD_TTL_MS) {
+      pickerPreloadCache.delete(messageId);
+      return entry.state;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return null;
+}
+
+function takePreloadedPickerState(messageId) {
+  const entry = pickerPreloadCache.get(messageId);
+  if (!entry) {
+    return null;
+  }
+  pickerPreloadCache.delete(messageId);
+  if (Date.now() - entry.at > PICKER_PRELOAD_TTL_MS) {
+    return null;
+  }
+  return entry.state;
+}
+
+function schedulePickerPreload(accountId, currentMessageId) {
+  if (!accountId || !currentMessageId) {
+    return;
+  }
+  const flightKey = `${accountId}:${currentMessageId}`;
+  if (pickerPreloadInFlight.has(flightKey)) {
+    return;
+  }
+  pickerPreloadInFlight.add(flightKey);
+  (async () => {
+    try {
+      const nextId = await guessNextInboxMessageId(accountId, currentMessageId);
+      if (!nextId) {
+        return;
+      }
+      const cached = pickerPreloadCache.get(nextId);
+      if (cached && Date.now() - cached.at < PICKER_PRELOAD_TTL_MS) {
+        return;
+      }
+      const state = await buildPickerStateForMessages(accountId, [{ id: nextId }]);
+      pickerPreloadCache.set(nextId, { state, at: Date.now() });
+    } catch (error) {
+      console.warn('Picker preload failed:', error);
+    } finally {
+      pickerPreloadInFlight.delete(flightKey);
+    }
+  })();
+}
+
+const FOLDER_PICKER_ADVANCE_MS = 40;
+
+async function getFolderPickerInitialState() {
+  const ctx = await getFolderPickerContext();
+  void getInboxMessageIds(ctx.accountId);
+  const rankedState = await listRankedFolders(ctx.accountId, ctx.messageIds[0]);
+  schedulePickerPreload(ctx.accountId, ctx.messageIds[0]);
+  return {
+    accountId: ctx.accountId,
+    messageIds: ctx.messageIds,
+    folders: rankedState.folders,
+    ranked: rankedState.ranked,
+    rankingError: rankedState.rankingError
+  };
+}
+
+async function refreshFolderPickerAfterMove(movedMessageIds, accountId, previousMessageId) {
+  const moved = movedMessageIds || [];
+  const movedSet = new Set(moved);
+  for (const movedId of movedSet) {
+    pickerPreloadCache.delete(movedId);
+  }
+
+  if (accountId && previousMessageId) {
+    const nextId = await resolveNextInboxMessageIdAfterMove(
+      accountId,
+      previousMessageId,
+      moved
+    );
+    if (!nextId) {
+      return { close: true };
+    }
+
+    let state = takePreloadedPickerState(nextId);
+    if (!state) {
+      state = await waitForPickerPreload(nextId, 200);
+    }
+    if (state) {
+      schedulePickerPreload(accountId, nextId);
+      return state;
+    }
+
+    rankAndNotifyPicker(accountId, nextId);
+    schedulePickerPreload(accountId, nextId);
+    return buildQuickPickerState(accountId, nextId);
+  }
+
+  for (let attempt = 0; attempt < 8; attempt++) {
     if (attempt > 0) {
       await new Promise(resolve => setTimeout(resolve, FOLDER_PICKER_ADVANCE_MS));
     }
@@ -312,22 +583,23 @@ async function refreshFolderPickerAfterMove(movedMessageIds) {
     if (!messages.length) {
       return { close: true };
     }
-    const nextMessages = messages.filter(m => !moved.has(m.id));
+    const nextMessages = messages.filter(m => !movedSet.has(m.id));
     if (!nextMessages.length) {
       continue;
     }
-    const accountId = await accountIdFromMessageHeader(nextMessages[0]);
-    const folders = await getFoldersForContextMenu(accountId, nextMessages);
-    const ranked = folders.some(f => (Number(f.score) || 0) > 0);
-    const rankingError = folders.find(f => f.rankingError)?.rankingError || null;
-    return {
-      close: false,
-      accountId,
-      messageIds: nextMessages.map(m => m.id),
-      folders,
-      ranked,
-      rankingError
-    };
+    const resolvedAccountId = await accountIdFromMessageHeader(nextMessages[0]);
+    const nextId = nextMessages[0].id;
+    let state = takePreloadedPickerState(nextId);
+    if (!state) {
+      state = await waitForPickerPreload(nextId, 500);
+    }
+    if (state) {
+      schedulePickerPreload(resolvedAccountId, nextId);
+      return state;
+    }
+    rankAndNotifyPicker(resolvedAccountId, nextId);
+    schedulePickerPreload(resolvedAccountId, nextId);
+    return buildQuickPickerState(resolvedAccountId, nextId);
   }
   return { close: true };
 }
@@ -366,14 +638,14 @@ async function rebuildMessageListMenus(info) {
 
   const menuFolders = folders.slice(0, MAX_CONTEXT_MENU_FOLDERS);
   learnFolderPathsForMenu = menuFolders.map(f => f.path);
-  for (let i = 0; i < menuFolders.length; i++) {
-    await browser.menus.create({
+  await Promise.all(menuFolders.map((folder, i) =>
+    browser.menus.create({
       id: `${FOLDER_MENU_PREFIX}${i}`,
       parentId: MENU_MOVE_TO_PARENT,
-      title: menuFolders[i].title,
+      title: folder.title,
       contexts: ['message_list']
-    });
-  }
+    })
+  ));
 
   const filterTitle = folders.length > MAX_CONTEXT_MENU_FOLDERS
     ? `Filter folders… (${folders.length} total)`
@@ -540,6 +812,7 @@ async function deleteIndex(accountId) {
   await browser.storage.local.remove(indexStorageKey(accountId));
   await browser.storage.local.remove(`model_${accountId}`);
   indexCache.delete(accountId);
+  invalidateArchiveFoldersCache(accountId);
   const data = await browser.storage.local.get('trainedAccounts');
   const accounts = (data.trainedAccounts || []).filter(id => id !== accountId);
   await browser.storage.local.set({ trainedAccounts: accounts });
@@ -562,6 +835,7 @@ async function saveFolderStructure(accountId, folders) {
     await browser.storage.local.set({
       [`folders_${accountId}`]: JSON.stringify(normalized)
     });
+    invalidateArchiveFoldersCache(accountId);
     return true;
   } catch (error) {
     console.error('Error saving folder structure:', error);
@@ -674,8 +948,8 @@ function samplesPerFolderForIndex(settings, folderCount) {
 }
 
 async function trainModel(account, selectedFolderPaths) {
-  const settings = await ollamaArchive.getOllamaSettings();
-  await ollamaArchive.checkOllamaAvailable(settings);
+  const settings = await llamaArchive.getLlamaSettings();
+  await llamaArchive.checkLlamaEmbedAvailable(settings);
 
   const allFolders = await browser.folders.query({
     accountId: account.id,
@@ -713,20 +987,22 @@ async function trainModel(account, selectedFolderPaths) {
 
     for (const message of toIndex) {
       try {
-        const content = await ollamaArchive.getMessageContent(
+        const content = await llamaArchive.getMessageContent(
           message.id,
           settings.bodyPreviewLength
         );
-        const embedText = ollamaArchive.buildEmbedText({
+        const embedText = llamaArchive.buildEmbedText({
           author: content.author,
+          recipients: content.recipients,
           subject: content.subject,
           bodyPreview: content.bodyPreview
         });
-        const embedding = await ollamaArchive.embedText(embedText, settings);
+        const embedding = await llamaArchive.embedText(embedText, settings);
         entries.push({
           messageId: message.id,
           folderPath,
           author: content.author,
+          recipients: content.recipients,
           subject: content.subject,
           bodyPreview: content.bodyPreview,
           embedding
@@ -760,7 +1036,6 @@ async function trainModel(account, selectedFolderPaths) {
     accountId: account.id,
     updatedAt: Date.now(),
     settings: {
-      chatModel: settings.chatModel,
       embedModel: settings.embedModel
     },
     entries
@@ -782,6 +1057,107 @@ async function trainModel(account, selectedFolderPaths) {
     foldersTotal: folderPaths.length,
     samplesPerFolder
   };
+}
+
+async function trainAllAccounts() {
+  const settings = await llamaArchive.getLlamaSettings();
+  await llamaArchive.checkLlamaEmbedAvailable(settings);
+
+  const accounts = await browser.accounts.list();
+  const summary = [];
+
+  for (let i = 0; i < accounts.length; i++) {
+    const account = accounts[i];
+    const folders = await getFoldersWithState(account);
+    const selectedPaths = folders.filter(f => f.selected).map(f => f.path);
+
+    sendProgress({
+      type: 'training-account-start',
+      accountName: account.name,
+      accountIndex: i + 1,
+      accountTotal: accounts.length
+    });
+
+    if (!selectedPaths.length) {
+      summary.push({
+        accountId: account.id,
+        accountName: account.name,
+        skipped: true,
+        reason: 'No folders selected'
+      });
+      continue;
+    }
+
+    try {
+      const result = await trainModel(account, selectedPaths);
+      summary.push({
+        accountId: account.id,
+        accountName: account.name,
+        skipped: false,
+        ...result
+      });
+    } catch (error) {
+      summary.push({
+        accountId: account.id,
+        accountName: account.name,
+        skipped: false,
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  browser.runtime.sendMessage({ type: 'training-complete' }).catch(() => {});
+
+  const trained = summary.filter(r => r.success);
+  const failed = summary.filter(r => !r.skipped && !r.success);
+  const skipped = summary.filter(r => r.skipped);
+
+  return {
+    success: failed.length === 0,
+    accountsTotal: accounts.length,
+    trainedCount: trained.length,
+    failedCount: failed.length,
+    skippedCount: skipped.length,
+    results: summary
+  };
+}
+
+async function listInboxMessages(accountIds) {
+  const ids = [...new Set((accountIds || []).filter(Boolean))];
+  if (!ids.length) {
+    return { messages: [] };
+  }
+
+  const accounts = await browser.accounts.list();
+  const nameById = new Map(accounts.map(a => [a.id, a.name]));
+  const messages = [];
+
+  for (const accountId of ids) {
+    const folders = await browser.folders.query({
+      accountId,
+      specialUse: ['inbox']
+    });
+    if (!folders?.length) {
+      continue;
+    }
+    let page = await browser.messages.list(folders[0].id);
+    while (page) {
+      for (const msg of page.messages || []) {
+        messages.push({
+          id: msg.id,
+          author: msg.author,
+          subject: msg.subject,
+          date: msg.date,
+          accountId,
+          accountName: nameById.get(accountId) || accountId
+        });
+      }
+      page = page.id ? await browser.messages.continueList(page.id) : null;
+    }
+  }
+
+  return { messages };
 }
 
 async function getTrainedAccounts() {
@@ -806,8 +1182,8 @@ async function deleteModel(accountId) {
 }
 
 async function classifyMessages(accountId, messageIds) {
-  const settings = await ollamaArchive.getOllamaSettings();
-  await ollamaArchive.checkOllamaAvailable(settings);
+  const settings = await llamaArchive.getLlamaSettings();
+  await llamaArchive.checkLlamaEmbedAvailable(settings);
   const index = await loadIndex(accountId);
 
   const ids = messageIds || [];
@@ -824,7 +1200,7 @@ async function classifyMessages(accountId, messageIds) {
       continue;
     }
     try {
-      const prediction = await ollamaArchive.classifyMessageRagOnly(
+      const prediction = await llamaArchive.classifyMessageRagOnly(
         index,
         messageId,
         settings
@@ -854,14 +1230,7 @@ async function moveMessages(accountId, messages) {
       if (!message.predictedFolder) {
         throw new Error('No predicted folder for message');
       }
-      const folders = await browser.folders.query({
-        accountId,
-        path: message.predictedFolder
-      });
-      if (!folders?.length) {
-        throw new Error(`Target folder ${message.predictedFolder} not found`);
-      }
-      const targetFolderId = folders[0].id;
+      const targetFolderId = await resolveFolderId(accountId, message.predictedFolder);
       try {
         await browser.messages.move([message.id], targetFolderId);
         results.push({ messageId: message.id, success: true, copied: false, count: 1 });
@@ -890,48 +1259,46 @@ function isUserFolder(folder) {
   return !isDefaultFolder(folder);
 }
 
-async function checkOllamaStatus() {
+async function checkLlamaStatus() {
   try {
-    const settings = await ollamaArchive.getOllamaSettings();
-    await ollamaArchive.checkOllamaAvailable(settings);
+    const settings = await llamaArchive.getLlamaSettings();
+    await llamaArchive.checkLlamaEmbedAvailable(settings);
     return { ok: true, settings };
   } catch (error) {
     return { ok: false, error: error.message };
   }
 }
 
-async function listOllamaModelsForPicker() {
-  const settings = await ollamaArchive.getOllamaSettings();
-  const all = await ollamaArchive.listOllamaModels(settings);
-  const embedModels = all.filter(name => ollamaArchive.isEmbedModelName(name));
-  const chatModels = all.filter(name => !ollamaArchive.isEmbedModelName(name));
+async function listLlamaModelsForPicker() {
+  const settings = await llamaArchive.getLlamaSettings();
+  const all = await llamaArchive.listLlamaModels(settings);
+  const embedModels = all.filter(name => llamaArchive.isEmbedModelName(name));
   return {
     settings,
-    chatModels: chatModels.length ? chatModels : all,
     embedModels: embedModels.length ? embedModels : all
   };
 }
 
-async function saveOllamaSettingsFromPicker(partial) {
-  const settings = await ollamaArchive.saveOllamaSettings(partial);
-  const validateModels = partial.chatModel || partial.embedModel;
-  if (!validateModels) {
+async function saveLlamaSettingsFromPicker(partial) {
+  const settings = await llamaArchive.saveLlamaSettings(partial);
+  if (!partial.embedModel) {
     return { ok: true, settings };
   }
   try {
-    await ollamaArchive.checkOllamaAvailable(settings);
+    await llamaArchive.checkLlamaEmbedAvailable(settings);
     return { ok: true, settings };
   } catch (error) {
     return { ok: false, settings, error: error.message };
   }
 }
 
-async function testOllamaConnectionForPicker(baseUrl) {
-  const settings = await ollamaArchive.saveOllamaSettings({
-    baseUrl: baseUrl.replace(/\/$/, '')
+async function testLlamaConnectionForPicker(embedBaseUrl) {
+  const settings = await llamaArchive.saveLlamaSettings({
+    embedBaseUrl: String(embedBaseUrl || '').replace(/\/$/, ''),
+    baseUrl: String(embedBaseUrl || '').replace(/\/$/, '')
   });
   try {
-    const result = await ollamaArchive.testOllamaConnection(settings);
+    const result = await llamaArchive.testLlamaConnection(settings);
     return { ok: true, settings, ...result };
   } catch (error) {
     return { ok: false, settings, error: error.message };
@@ -940,16 +1307,21 @@ async function testOllamaConnectionForPicker(baseUrl) {
 
 async function handleBackgroundMessage(message) {
   switch (message.action) {
+    case 'checkLlamaStatus':
     case 'checkOllamaStatus':
-      return checkOllamaStatus();
+      return checkLlamaStatus();
+    case 'getLlamaSettings':
     case 'getOllamaSettings':
-      return ollamaArchive.getOllamaSettings();
+      return llamaArchive.getLlamaSettings();
+    case 'listLlamaModels':
     case 'listOllamaModels':
-      return listOllamaModelsForPicker();
+      return listLlamaModelsForPicker();
+    case 'saveLlamaSettings':
     case 'saveOllamaSettings':
-      return saveOllamaSettingsFromPicker(message.settings);
+      return saveLlamaSettingsFromPicker(message.settings);
+    case 'testLlamaConnection':
     case 'testOllamaConnection':
-      return testOllamaConnectionForPicker(message.baseUrl);
+      return testLlamaConnectionForPicker(message.embedBaseUrl || message.baseUrl);
     case 'getTrainedAccounts':
       return getTrainedAccounts();
     case 'deleteModel':
@@ -962,6 +1334,10 @@ async function handleBackgroundMessage(message) {
       return { ok: true };
     case 'trainModel':
       return trainModel(message.account, message.selectedFolderPaths);
+    case 'trainAllAccounts':
+      return trainAllAccounts();
+    case 'listInboxMessages':
+      return listInboxMessages(message.accountIds);
     case 'classifyMessages':
       return classifyMessages(message.accountId, message.messageIds);
     case 'moveMessages':
@@ -976,16 +1352,26 @@ async function handleBackgroundMessage(message) {
       return { ok: true };
     case 'getFolderPickerContext':
       return getFolderPickerContext();
+    case 'getFolderPickerInitialState':
+      return getFolderPickerInitialState();
     case 'listRankedFolders':
       return listRankedFolders(message.accountId, message.messageId);
     case 'refreshFolderPickerAfterMove':
-      return refreshFolderPickerAfterMove(message.movedMessageIds);
+      return refreshFolderPickerAfterMove(
+        message.movedMessageIds,
+        message.accountId,
+        message.previousMessageId
+      );
+    case 'preloadNextPickerState':
+      schedulePickerPreload(message.accountId, message.currentMessageId);
+      return { ok: true };
     case 'learnAndMoveToFolder':
       return learnAndMoveMessages(
         message.accountId,
         message.messageIds,
         message.folderPath,
-        false
+        false,
+        { backgroundLearn: message.backgroundLearn !== false }
       );
     default:
       throw new Error(`Unknown action: ${message.action}`);

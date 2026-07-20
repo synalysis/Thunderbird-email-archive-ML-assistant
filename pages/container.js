@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const trainingTypes = new Set([
       'training-progress',
       'training-complete',
+      'training-account-start',
       'folder-sync-start',
       'folder-sync-complete'
     ]);

@@ -1,6 +1,16 @@
 let currentAccount = null;
 let messages = [];
 let isClassifying = false;
+let accountNames = new Map();
+const ALL_ACCOUNTS_ID = '__all__';
+
+function isAllAccountsMode() {
+  return currentAccount?.id === ALL_ACCOUNTS_ID;
+}
+
+function tableColspan() {
+  return 7;
+}
 
 // One embedding per message (RAG match, no LLM); small batches avoid sendMessage timeouts.
 const CLASSIFY_BATCH_SIZE = 1;
@@ -64,6 +74,10 @@ function sortMessages(field, ascending = true) {
         aValue = Number.isFinite(a.confidence) ? a.confidence : -1;
         bValue = Number.isFinite(b.confidence) ? b.confidence : -1;
         break;
+      case 'account':
+        aValue = (a.accountName || '').toLowerCase();
+        bValue = (b.accountName || '').toLowerCase();
+        break;
       default:
         return 0;
     }
@@ -94,6 +108,7 @@ function updateTable() {
 
     row.innerHTML = `
       <td><input type="checkbox" data-index="${index}"></td>
+      <td class="col-account" title="${escapeHtml(message.accountName || '')}">${escapeHtml(message.accountName || '')}</td>
       <td class="col-date">${new Date(message.date).toLocaleDateString()}</td>
       <td class="col-from">${escapeHtml(message.author || '')}</td>
       <td class="col-subject">${escapeHtml(message.subject || '')}</td>
@@ -111,7 +126,7 @@ function updateTable() {
 }
 
 async function classifyAllMessages() {
-  if (!currentAccount || isClassifying) return;
+  if (!currentAccount || isClassifying || !messages.length) return;
 
   const status = document.getElementById('status');
   const archiveButton = document.getElementById('archiveConfidentButton');
@@ -126,36 +141,48 @@ async function classifyAllMessages() {
 
   try {
     let failed = 0;
+    let processed = 0;
     const total = messages.length;
+    const byAccount = new Map();
 
-    for (let start = 0; start < total; start += CLASSIFY_BATCH_SIZE) {
-      const batch = messages.slice(start, start + CLASSIFY_BATCH_SIZE);
-      const batchResults = await emailArchiveRequest('classifyMessages', {
-        accountId: currentAccount.id,
-        messageIds: batch.map(m => m.id)
-      });
+    messages.forEach((message, index) => {
+      if (!byAccount.has(message.accountId)) {
+        byAccount.set(message.accountId, []);
+      }
+      byAccount.get(message.accountId).push({ index, id: message.id });
+    });
 
-      batchResults.forEach((result, batchIndex) => {
-        const index = start + batchIndex;
-        if (result.error || !result.folder) {
-          failed++;
-          const rows = document.getElementById('messageList').getElementsByTagName('tr');
-          const targetCell = rows[index]?.querySelector('.target-folder');
-          if (targetCell) {
-            targetCell.textContent = result.error ? 'Failed' : '';
-            targetCell.classList.add('error');
+    for (const [accountId, items] of byAccount) {
+      for (let start = 0; start < items.length; start += CLASSIFY_BATCH_SIZE) {
+        const batch = items.slice(start, start + CLASSIFY_BATCH_SIZE);
+        const batchResults = await emailArchiveRequest('classifyMessages', {
+          accountId,
+          messageIds: batch.map(item => item.id)
+        });
+
+        batchResults.forEach((result, batchIndex) => {
+          const { index } = batch[batchIndex];
+          processed++;
+          if (result.error || !result.folder) {
+            failed++;
+            const rows = document.getElementById('messageList').getElementsByTagName('tr');
+            const targetCell = rows[index]?.querySelector('.target-folder');
+            if (targetCell) {
+              targetCell.textContent = result.error ? 'Failed' : '';
+              targetCell.classList.add('error');
+            }
+          } else {
+            applyPredictionToRow(index, result, threshold);
           }
-        } else {
-          applyPredictionToRow(index, result, threshold);
-        }
-      });
+        });
 
-      status.textContent =
-        `Classifying ${Math.min(start + batch.length, total)} / ${total} (embedding match per message)…`;
+        status.textContent =
+          `Classifying ${processed} / ${total} (embedding match per message)…`;
+      }
     }
 
     status.textContent = failed
-      ? `Classification done. ${failed} of ${total} failed (is Ollama running?).`
+      ? `Classification done. ${failed} of ${total} failed (is llama-server running on port 8083?).`
       : `Classification complete for ${total} message(s).`;
     status.className = failed ? 'warning' : 'success';
   } catch (error) {
@@ -171,9 +198,10 @@ async function classifyAllMessages() {
 async function loadInboxMessages() {
   const messageList = document.getElementById('messageList');
   const status = document.getElementById('status');
+  const colspan = tableColspan();
 
   if (!currentAccount) {
-    messageList.innerHTML = '<tr><td colspan="6">Please select an account</td></tr>';
+    messageList.innerHTML = `<tr><td colspan="${colspan}">Please select an account</td></tr>`;
     return;
   }
 
@@ -181,37 +209,61 @@ async function loadInboxMessages() {
     status.textContent = 'Loading messages…';
     messages = [];
 
-    const folders = await browser.folders.query({
-      accountId: currentAccount.id,
-      specialUse: ['inbox']
-    });
-    if (!folders?.length) throw new Error('Inbox folder not found');
+    const accountIds = isAllAccountsMode()
+      ? [...accountNames.keys()]
+      : [currentAccount.id];
 
-    let page = await browser.messages.list(folders[0].id);
-    while (page) {
-      if (page.messages?.length) {
-        messages.push(...page.messages);
-      }
-      page = page.id ? await browser.messages.continueList(page.id) : null;
-    }
+    const { messages: loaded } = await emailArchiveRequest('listInboxMessages', {
+      accountIds
+    });
+    messages = loaded || [];
 
     if (messages.length === 0) {
-      messageList.innerHTML = '<tr><td colspan="6">No messages in Inbox</td></tr>';
-      status.textContent = 'Inbox is empty';
+      messageList.innerHTML = `<tr><td colspan="${colspan}">No messages in Inbox</td></tr>`;
+      status.textContent = isAllAccountsMode()
+        ? 'All indexed inboxes are empty'
+        : 'Inbox is empty';
       status.className = 'warning';
       return;
     }
 
     updateTable();
-    status.textContent =
-      `Loaded ${messages.length} messages. Classifying by similarity to your index…`;
+    status.textContent = isAllAccountsMode()
+      ? `Loaded ${messages.length} messages from ${accountIds.length} account(s). Classifying…`
+      : `Loaded ${messages.length} messages. Classifying by similarity to your index…`;
     await classifyAllMessages();
   } catch (error) {
     console.error('Error loading messages:', error);
-    messageList.innerHTML = '<tr><td colspan="6">Error loading messages</td></tr>';
+    messageList.innerHTML = `<tr><td colspan="${colspan}">Error loading messages</td></tr>`;
     status.textContent = `Error: ${error.message}`;
     status.className = 'error';
   }
+}
+
+async function moveMessagesGrouped(toMove) {
+  const byAccount = new Map();
+  toMove.forEach(message => {
+    if (!byAccount.has(message.accountId)) {
+      byAccount.set(message.accountId, []);
+    }
+    byAccount.get(message.accountId).push(message);
+  });
+
+  let successCount = 0;
+  let failCount = 0;
+  for (const [accountId, accountMessages] of byAccount) {
+    const results = await emailArchiveRequest('moveMessages', {
+      accountId,
+      messages: accountMessages.map(m => ({
+        id: m.id,
+        predictedFolder: m.predictedFolder
+      }))
+    });
+    const ok = results.filter(r => r.success).length;
+    successCount += ok;
+    failCount += results.length - ok;
+  }
+  return { successCount, failCount };
 }
 
 function updateActionButtons() {
@@ -284,17 +336,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   const status = document.getElementById('status');
   const confidenceSlider = document.getElementById('confidenceSlider');
   const confidenceValue = document.getElementById('confidenceValue');
-  const ollamaStatus = document.getElementById('ollamaStatus');
+  const llamaStatus = document.getElementById('llamaStatus');
 
-  async function updateOllamaStatus() {
+  async function updateLlamaStatus() {
     try {
-      const stored = await emailArchiveRequest('getOllamaSettings');
-      await fetchOllamaTags(stored.baseUrl);
-      ollamaStatus.textContent = `Ollama: ${stored.chatModel} + ${stored.embedModel}`;
-      ollamaStatus.className = 'ollama-status ok';
+      const stored = await emailArchiveRequest('getLlamaSettings');
+      const embedUrl = stored.embedBaseUrl || stored.baseUrl;
+      await fetchLlamaTags(embedUrl);
+      llamaStatus.textContent = `llama.cpp: ${stored.embedModel || 'default'} @ ${embedUrl}`;
+      llamaStatus.className = 'llama-status ok';
     } catch (error) {
-      ollamaStatus.textContent = `Ollama: ${error.message}`;
-      ollamaStatus.className = 'ollama-status error';
+      llamaStatus.textContent = `llama.cpp: ${error.message}`;
+      llamaStatus.className = 'llama-status error';
     }
   }
 
@@ -304,10 +357,14 @@ document.addEventListener('DOMContentLoaded', async () => {
       refreshButton.textContent = '⌛';
       const accounts = await browser.accounts.list();
       const trainedAccounts = await emailArchiveRequest('getTrainedAccounts');
+      accountNames = new Map();
 
       accountSelect.innerHTML = '<option value="">Select Account</option>';
+      const trainedList = [];
       for (const account of accounts) {
         if (trainedAccounts.includes(account.id)) {
+          trainedList.push(account);
+          accountNames.set(account.id, account.name);
           const option = document.createElement('option');
           option.value = account.id;
           option.textContent = account.name;
@@ -315,8 +372,23 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
       }
 
-      if (currentAccount && trainedAccounts.includes(currentAccount.id)) {
+      if (trainedList.length > 1) {
+        const allOption = document.createElement('option');
+        allOption.value = ALL_ACCOUNTS_ID;
+        allOption.textContent = `All indexed accounts (${trainedList.length})`;
+        accountSelect.insertBefore(allOption, accountSelect.options[1]);
+      }
+
+      if (currentAccount?.id === ALL_ACCOUNTS_ID && trainedList.length > 1) {
+        accountSelect.value = ALL_ACCOUNTS_ID;
+      } else if (currentAccount && trainedAccounts.includes(currentAccount.id)) {
         accountSelect.value = currentAccount.id;
+      } else if (trainedList.length === 1) {
+        currentAccount = trainedList[0];
+        accountSelect.value = currentAccount.id;
+      } else if (trainedList.length > 1) {
+        currentAccount = { id: ALL_ACCOUNTS_ID, name: 'All indexed accounts' };
+        accountSelect.value = ALL_ACCOUNTS_ID;
       } else {
         currentAccount = null;
         accountSelect.value = '';
@@ -330,12 +402,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  await updateOllamaStatus();
+  await updateLlamaStatus();
   await loadAccounts();
+  if (currentAccount) {
+    await loadInboxMessages();
+  }
 
   refreshButton.addEventListener('click', async () => {
     await loadAccounts();
-    await updateOllamaStatus();
+    await updateLlamaStatus();
     status.textContent = 'Account list refreshed';
     status.className = 'success';
   });
@@ -344,10 +419,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     const accountId = accountSelect.value;
     if (!accountId) {
       currentAccount = null;
+      messages = [];
+      document.getElementById('messageList').innerHTML = '';
       return;
     }
-    const accounts = await browser.accounts.list();
-    currentAccount = accounts.find(a => a.id === accountId);
+    if (accountId === ALL_ACCOUNTS_ID) {
+      currentAccount = { id: ALL_ACCOUNTS_ID, name: 'All indexed accounts' };
+    } else {
+      const accounts = await browser.accounts.list();
+      currentAccount = accounts.find(a => a.id === accountId);
+    }
     if (!currentAccount) return;
     await loadInboxMessages();
   });
@@ -390,15 +471,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     archiveButton.disabled = true;
     status.textContent = `Archiving ${toMove.length} message(s)…`;
     try {
-      const results = await emailArchiveRequest('moveMessages', {
-        accountId: currentAccount.id,
-        messages: toMove.map(m => ({
-          id: m.id,
-          predictedFolder: m.predictedFolder
-        }))
-      });
-      const successCount = results.filter(r => r.success).length;
-      const failCount = results.length - successCount;
+      const { successCount, failCount } = await moveMessagesGrouped(toMove);
       await loadInboxMessages();
       status.textContent = failCount
         ? `Archived ${successCount}. ${failCount} failed.`
@@ -433,16 +506,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     moveButton.disabled = true;
     try {
-      await emailArchiveRequest('moveMessages', {
-        accountId: currentAccount.id,
-        messages: selectedMessages.map(m => ({
-          id: m.id,
-          predictedFolder: m.predictedFolder
-        }))
-      });
+      const { successCount, failCount } = await moveMessagesGrouped(selectedMessages);
       await loadInboxMessages();
-      status.textContent = `Moved ${selectedMessages.length} selected message(s).`;
-      status.className = 'success';
+      status.textContent = failCount
+        ? `Moved ${successCount}. ${failCount} failed.`
+        : `Moved ${successCount} selected message(s).`;
+      status.className = failCount ? 'warning' : 'success';
     } catch (error) {
       status.textContent = `Error: ${error.message}`;
       status.className = 'error';
@@ -466,7 +535,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.addEventListener('visibilitychange', async () => {
     if (document.visibilityState === 'visible') {
       await loadAccounts();
-      await updateOllamaStatus();
+      await updateLlamaStatus();
     }
   });
 });

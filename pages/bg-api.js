@@ -4,7 +4,7 @@ async function emailArchiveRequest(action, payload = {}) {
   const response = await browser.runtime.sendMessage({ action, ...payload });
   if (response === undefined || response === null) {
     throw new Error(
-      'No response from background. Reload the add-on, ensure Ollama is running, then try again.'
+      'No response from background. Reload the add-on, ensure llama-server is running, then try again.'
     );
   }
   if (response?.error) {

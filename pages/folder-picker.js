@@ -160,7 +160,7 @@ function applyPickerState(state) {
     pickerRankingIsError = true;
   } else if (state.ranked === false || !hasScores) {
     pickerRankingNote = allFolders.length
-      ? 'Folders are alphabetical — no match scores (train the index or check Ollama).'
+      ? 'Folders are alphabetical — no match scores (train the index or check llama-server).'
       : null;
     pickerRankingIsError = false;
   } else {
@@ -172,9 +172,20 @@ function applyPickerState(state) {
   currentFilterQuery = '';
   renderFolderList('');
   updateHint();
+  scheduleNextPreload();
 }
 
-async function reloadForNextDisplayedMessage(movedMessageIds) {
+function scheduleNextPreload() {
+  if (!pickerContext?.accountId || !pickerContext.messageIds?.[0]) {
+    return;
+  }
+  emailArchiveRequest('preloadNextPickerState', {
+    accountId: pickerContext.accountId,
+    currentMessageId: pickerContext.messageIds[0]
+  }).catch(() => {});
+}
+
+async function reloadForNextDisplayedMessage(movedMessageIds, accountId, previousMessageId) {
   const status = document.getElementById('status');
   const filterInput = document.getElementById('folderFilter');
   status.textContent = 'Loading next message…';
@@ -182,14 +193,20 @@ async function reloadForNextDisplayedMessage(movedMessageIds) {
 
   try {
     const state = await emailArchiveRequest('refreshFolderPickerAfterMove', {
-      movedMessageIds
+      movedMessageIds,
+      accountId,
+      previousMessageId
     });
     if (state.close) {
       window.close();
       return;
     }
     applyPickerState(state);
-    status.textContent = 'Ready for the current message.';
+    if (state.ranked === false && !state.rankingError) {
+      status.textContent = 'Folders ready — ranking in background…';
+    } else {
+      status.textContent = 'Ready for the current message.';
+    }
     status.className = 'status';
     filterInput.disabled = false;
     filterInput.focus();
@@ -207,6 +224,9 @@ async function moveToFolder(folderPath) {
   const status = document.getElementById('status');
   const filterInput = document.getElementById('folderFilter');
   const movedMessageIds = [...pickerContext.messageIds];
+  const accountId = pickerContext.accountId;
+  const previousMessageId = pickerContext.messageIds[0];
+  scheduleNextPreload();
   status.textContent = 'Moving…';
   status.className = 'status';
   filterInput.disabled = true;
@@ -219,7 +239,7 @@ async function moveToFolder(folderPath) {
     });
     status.textContent = result.summary || 'Moved.';
     status.className = 'status success';
-    await reloadForNextDisplayedMessage(movedMessageIds);
+    await reloadForNextDisplayedMessage(movedMessageIds, accountId, previousMessageId);
   } catch (error) {
     status.textContent = error.message;
     status.className = 'status error';
@@ -258,18 +278,8 @@ async function loadInitialPicker() {
   const status = document.getElementById('status');
 
   status.textContent = 'Loading folders…';
-  pickerContext = await emailArchiveRequest('getFolderPickerContext');
-  const rankedState = await emailArchiveRequest('listRankedFolders', {
-    accountId: pickerContext.accountId,
-    messageId: pickerContext.messageIds[0]
-  });
-  applyPickerState({
-    accountId: pickerContext.accountId,
-    messageIds: pickerContext.messageIds,
-    folders: rankedState.folders,
-    ranked: rankedState.ranked,
-    rankingError: rankedState.rankingError
-  });
+  const state = await emailArchiveRequest('getFolderPickerInitialState');
+  applyPickerState(state);
   filterInput.focus();
 }
 
@@ -277,6 +287,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   const filterInput = document.getElementById('folderFilter');
   const status = document.getElementById('status');
   const listEl = document.getElementById('folderList');
+
+  browser.runtime.onMessage.addListener(message => {
+    if (message?.type !== 'picker-state-update' || moving || !message.state) {
+      return undefined;
+    }
+    const nextId = message.state.messageIds?.[0];
+    if (!nextId || pickerContext?.messageIds?.[0] !== nextId) {
+      return undefined;
+    }
+    applyPickerState(message.state);
+    status.textContent = 'Ready for the current message.';
+    status.className = 'status';
+    return undefined;
+  });
 
   listEl.addEventListener('click', event => {
     const btn = event.target.closest('button[data-path]');

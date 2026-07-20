@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Email Archive Assistant",
-  "version": "1.7.2",
-  "description": "Archive inbox mail using local Ollama LLM and folder index (RAG)",
+  "version": "1.10.5",
+  "description": "Archive inbox mail using local llama.cpp embeddings and folder index (RAG)",
   "author": "Andrea Clementi with Cursor, Claude-Sonnet-3.5, o1",
   "browser_specific_settings": {
     "gecko": {
@@ -11,7 +11,7 @@
     }
   },
   "background": {
-    "scripts": ["background/ollama.js", "background/background.js"]
+    "scripts": ["background/llama.js", "background/background.js"]
   },
   "permissions": [
     "accountsRead",
@@ -24,8 +24,8 @@
     "tabs"
   ],
   "host_permissions": [
-    "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*"
+    "http://127.0.0.1:8083/*",
+    "http://localhost:8083/*"
   ],
   "options_ui": {
     "page": "pages/options.html",

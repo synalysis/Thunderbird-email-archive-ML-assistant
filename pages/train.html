@@ -161,6 +161,7 @@
 <body>
   <div class="sidebar">
     <h3>Account Selection</h3>
+    <p class="sync-status">Each account has its own folder selection and index.</p>
     <select id="accountSelect">
       <option value="">Select an account...</option>
     </select>
@@ -172,37 +173,31 @@
     <button id="selectAllFolders">Select All</button>
     <button id="deselectAllFolders">Deselect All</button>
     <button id="trainButton">Build archive index</button>
+    <button id="trainAllButton" title="Build index for every account using each account's folder selection">Build index for all accounts</button>
   </div>
   
   <div class="main-content">
     <h2>Email Archive Assistant - Training</h2>
-    <p>Indexes messages in your archive folders (via Ollama + embeddings) so the Archive tab can suggest destinations.</p>
-    <p class="sync-status">Ollama must allow Thunderbird: start with <code>OLLAMA_ORIGINS="moz-extension://*" ollama serve</code> (see readme).</p>
+    <p>Indexes messages in your archive folders (via llama.cpp embeddings) so the Archive tab can suggest destinations.</p>
+    <p class="sync-status">Embedding server default: port <strong>8083</strong> (see readme).</p>
     <p class="sync-status" id="indexingHint">Indexing samples messages per selected folder (all folders are covered; large mailboxes may take a while).</p>
-    <div id="ollamaStatus" class="sync-status"></div>
+    <div id="llamaStatus" class="sync-status"></div>
 
     <div class="model-picker">
-      <h3>Ollama connection</h3>
-      <label for="ollamaBaseUrl">API URL</label>
+      <h3>llama.cpp embedding server</h3>
+      <label for="embedBaseUrl">Embedding API URL (indexing &amp; ranking)</label>
       <div class="model-picker-row">
-        <input type="url" id="ollamaBaseUrl" placeholder="http://127.0.0.1:11434"
-               aria-label="Ollama API base URL">
+        <input type="url" id="embedBaseUrl" placeholder="http://127.0.0.1:8083"
+               aria-label="Embedding llama-server base URL">
         <button type="button" id="applyBaseUrlButton">Apply</button>
         <button type="button" id="testConnectionButton">Test connection</button>
       </div>
-      <h3>Ollama models</h3>
-      <label for="chatModelSelect">Classification (chat)</label>
+      <label for="embedModelSelect">Embedding model</label>
       <div class="model-picker-row">
-        <select id="chatModelSelect" aria-label="Chat model for classification">
+        <select id="embedModelSelect" aria-label="Embedding model loaded in llama-server">
           <option value="">Loading models…</option>
         </select>
-      </div>
-      <label for="embedModelSelect">Embeddings (indexing)</label>
-      <div class="model-picker-row">
-        <select id="embedModelSelect" aria-label="Embedding model for indexing">
-          <option value="">Loading models…</option>
-        </select>
-        <button type="button" id="refreshModelsButton" title="Reload model list from Ollama">Refresh</button>
+        <button type="button" id="refreshModelsButton" title="Reload model list from server">Refresh</button>
       </div>
       <h3>Index size</h3>
       <label for="maxSamplesPerFolder">Messages per folder (when building index)</label>
@@ -240,7 +235,7 @@
   </div>
 
   <script src="bg-api.js"></script>
-  <script src="ollama-client.js"></script>
+  <script src="llama-client.js"></script>
   <script src="train.js"></script>
 </body>
 </html> 

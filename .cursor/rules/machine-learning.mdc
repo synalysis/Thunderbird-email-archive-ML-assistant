@@ -4,7 +4,7 @@ globs:
 ---
 
 # Machine Learning Integration
-- Use Ollama on localhost for LLM classification and embeddings (nomic-embed-text).
-- Build a per-account folder index (RAG) from archived messages; classify inbox mail via similar examples + JSON LLM output.
-- Process email content efficiently; cap body preview length; sample up to N messages per archive folder (configurable on Training tab, default 10). Avoid a low global index cap that forces only a few samples per folder when many folders are selected.
-- Handle Ollama offline errors with clear user messages.
+- Use llama.cpp (`llama-server`) on localhost for embeddings (OpenAI-compatible `/v1/embeddings` at port 8083 by default).
+- Build a per-account folder index (RAG) from archived messages; classify inbox mail via embedding similarity (RAG-only on Archive tab).
+- Process email content efficiently; cap embed input to ~512 tokens (From + To/Cc + Subject + body preview); optional body read cap via `bodyPreviewLength`. Sample up to N messages per archive folder (configurable on Training tab, default 10). Avoid a low global index cap that forces only a few samples per folder when many folders are selected.
+- Handle llama-server offline errors with clear user messages. Rebuild the index after changing the embedding model or server.

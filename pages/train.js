@@ -4,16 +4,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   const accountSelect = document.getElementById('accountSelect');
   const folderTreeEl = document.getElementById('folderTree');
   const trainButton = document.getElementById('trainButton');
+  const trainAllButton = document.getElementById('trainAllButton');
   const modelsList = document.getElementById('modelsList');
   const status = document.getElementById('status');
   const folderCount = document.getElementById('folderCount');
   const messageCount = document.getElementById('messageCount');
   const currentFolder = document.getElementById('currentFolder');
-  const ollamaStatus = document.getElementById('ollamaStatus');
-  const chatModelSelect = document.getElementById('chatModelSelect');
+  const llamaStatus = document.getElementById('llamaStatus');
   const embedModelSelect = document.getElementById('embedModelSelect');
   const refreshModelsButton = document.getElementById('refreshModelsButton');
-  const ollamaBaseUrl = document.getElementById('ollamaBaseUrl');
+  const embedBaseUrlInput = document.getElementById('embedBaseUrl');
   const applyBaseUrlButton = document.getElementById('applyBaseUrlButton');
   const testConnectionButton = document.getElementById('testConnectionButton');
   const maxSamplesPerFolderInput = document.getElementById('maxSamplesPerFolder');
@@ -49,7 +49,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function loadIndexSettings() {
-    const stored = await emailArchiveRequest('getOllamaSettings');
+    const stored = await emailArchiveRequest('getLlamaSettings');
     maxSamplesPerFolderInput.value = String(stored.maxSamplesPerFolder);
     maxTotalIndexEntriesInput.value = String(stored.maxTotalIndexEntries);
     updateIndexingHints(stored);
@@ -70,11 +70,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     maxSamplesPerFolderInput.disabled = true;
     maxTotalIndexEntriesInput.disabled = true;
     try {
-      const settings = await emailArchiveRequest('saveOllamaSettings', { settings: partial });
+      const settings = await emailArchiveRequest('saveLlamaSettings', { settings: partial });
       updateIndexingHints(settings);
     } catch (error) {
-      ollamaStatus.textContent = error.message;
-      ollamaStatus.className = 'sync-status error';
+      llamaStatus.textContent = error.message;
+      llamaStatus.className = 'sync-status error';
     } finally {
       savingIndexSettings = false;
       maxSamplesPerFolderInput.disabled = false;
@@ -92,7 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (names.length === 0) {
       const option = document.createElement('option');
       option.value = '';
-      option.textContent = 'No models found — run ollama pull …';
+      option.textContent = 'No models found — start llama-server with --embedding';
       select.appendChild(option);
       select.disabled = true;
       return;
@@ -109,29 +109,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  async function loadModelPickers(baseUrlOverride) {
+  async function loadModelPickers(embedUrlOverride) {
     refreshModelsButton.disabled = true;
     applyBaseUrlButton.disabled = true;
     try {
-      const stored = await emailArchiveRequest('getOllamaSettings');
-      const baseUrl = normalizeBaseUrl(baseUrlOverride || ollamaBaseUrl.value || stored.baseUrl);
-      ollamaBaseUrl.value = baseUrl;
-      const { chatModels, embedModels } = await fetchOllamaTags(baseUrl);
-      fillModelSelect(chatModelSelect, chatModels, stored.chatModel);
+      const stored = await emailArchiveRequest('getLlamaSettings');
+      const embedUrl = normalizeBaseUrl(
+        embedUrlOverride || embedBaseUrlInput.value || stored.embedBaseUrl || stored.baseUrl
+      );
+      embedBaseUrlInput.value = embedUrl;
+      const { embedModels } = await fetchLlamaTags(embedUrl);
       fillModelSelect(embedModelSelect, embedModels, stored.embedModel);
-      chatModelSelect.disabled = savingModels;
       embedModelSelect.disabled = savingModels;
     } catch (error) {
-      chatModelSelect.innerHTML = '';
       embedModelSelect.innerHTML = '';
       const errOption = document.createElement('option');
       errOption.textContent = error.message;
-      chatModelSelect.appendChild(errOption);
-      embedModelSelect.appendChild(document.createElement('option'));
-      chatModelSelect.disabled = true;
+      embedModelSelect.appendChild(errOption);
       embedModelSelect.disabled = true;
-      ollamaStatus.textContent = error.message;
-      ollamaStatus.className = 'sync-status error';
+      llamaStatus.textContent = error.message;
+      llamaStatus.className = 'sync-status error';
     } finally {
       refreshModelsButton.disabled = savingModels;
       applyBaseUrlButton.disabled = false;
@@ -139,30 +136,39 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function testConnection() {
-    const baseUrl = normalizeBaseUrl(ollamaBaseUrl.value);
-    if (!baseUrl) {
-      ollamaStatus.textContent = 'Enter a valid Ollama URL (e.g. http://127.0.0.1:11434).';
-      ollamaStatus.className = 'sync-status error';
+    const embedUrl = normalizeBaseUrl(embedBaseUrlInput.value);
+    if (!embedUrl) {
+      llamaStatus.textContent = 'Enter a valid embedding server URL (e.g. http://127.0.0.1:8083).';
+      llamaStatus.className = 'sync-status error';
       return;
     }
     testConnectionButton.disabled = true;
     applyBaseUrlButton.disabled = true;
-    ollamaStatus.textContent = 'Requesting permission and testing connection…';
-    ollamaStatus.className = 'sync-status';
+    llamaStatus.textContent = 'Requesting permission and testing connection…';
+    llamaStatus.className = 'sync-status';
     try {
-      const parsed = new URL(baseUrl);
+      const parsed = new URL(embedUrl);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
         throw new Error('URL must start with http:// or https://');
       }
-      const { all, baseUrl: connectedUrl } = await fetchOllamaTags(baseUrl);
-      await emailArchiveRequest('saveOllamaSettings', { settings: { baseUrl: connectedUrl } });
-      ollamaStatus.textContent =
-        `Connected — ${all.length} model(s) at ${connectedUrl}`;
-      ollamaStatus.className = 'sync-status success';
-      await loadModelPickers(connectedUrl);
+      const granted = await requestHostPermission(embedUrl);
+      if (!granted) {
+        throw new Error(permissionDeniedMessage(embedUrl));
+      }
+      const result = await fetchLlamaTags(embedUrl);
+      await emailArchiveRequest('saveLlamaSettings', {
+        settings: {
+          embedBaseUrl: result.embedBaseUrl,
+          baseUrl: result.embedBaseUrl
+        }
+      });
+      llamaStatus.textContent =
+        `Connected — ${result.embeddingDims}-dim embeddings at ${result.embedBaseUrl}`;
+      llamaStatus.className = 'sync-status success';
+      await loadModelPickers(result.embedBaseUrl);
     } catch (error) {
-      ollamaStatus.textContent = error.message;
-      ollamaStatus.className = 'sync-status error';
+      llamaStatus.textContent = error.message;
+      llamaStatus.className = 'sync-status error';
     } finally {
       testConnectionButton.disabled = false;
       applyBaseUrlButton.disabled = false;
@@ -174,32 +180,29 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function saveSelectedModels() {
-    if (savingModels || !chatModelSelect.value || !embedModelSelect.value) {
+    if (savingModels || !embedModelSelect.value) {
       return;
     }
     savingModels = true;
-    chatModelSelect.disabled = true;
     embedModelSelect.disabled = true;
     refreshModelsButton.disabled = true;
     try {
-      const result = await emailArchiveRequest('saveOllamaSettings', {
+      const result = await emailArchiveRequest('saveLlamaSettings', {
         settings: {
-          chatModel: chatModelSelect.value,
           embedModel: embedModelSelect.value
         }
       });
       if (!result.ok) {
-        ollamaStatus.textContent = result.error;
-        ollamaStatus.className = 'sync-status error';
+        llamaStatus.textContent = result.error;
+        llamaStatus.className = 'sync-status error';
       } else {
-        await updateOllamaStatus();
+        await updateLlamaStatus();
       }
     } catch (error) {
-      ollamaStatus.textContent = error.message;
-      ollamaStatus.className = 'sync-status error';
+      llamaStatus.textContent = error.message;
+      llamaStatus.className = 'sync-status error';
     } finally {
       savingModels = false;
-      chatModelSelect.disabled = false;
       embedModelSelect.disabled = false;
       refreshModelsButton.disabled = false;
     }
@@ -213,16 +216,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     accountSelect.appendChild(option);
   }
 
-  async function updateOllamaStatus() {
+  async function updateLlamaStatus() {
     try {
-      const stored = await emailArchiveRequest('getOllamaSettings');
-      await fetchOllamaTags(ollamaBaseUrl.value || stored.baseUrl);
-      ollamaStatus.textContent =
-        `Ollama ready — ${stored.chatModel}, ${stored.embedModel}`;
-      ollamaStatus.className = 'sync-status success';
+      const stored = await emailArchiveRequest('getLlamaSettings');
+      const embedUrl = embedBaseUrlInput.value || stored.embedBaseUrl || stored.baseUrl;
+      await fetchLlamaTags(embedUrl);
+      llamaStatus.textContent =
+        `Server ready — ${stored.embedModel || 'default'} @ ${embedUrl}`;
+      llamaStatus.className = 'sync-status success';
     } catch (error) {
-      ollamaStatus.textContent = error.message;
-      ollamaStatus.className = 'sync-status error';
+      llamaStatus.textContent = error.message;
+      llamaStatus.className = 'sync-status error';
     }
   }
 
@@ -254,27 +258,38 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  ollamaBaseUrl.value = 'http://127.0.0.1:11434';
+  embedBaseUrlInput.value = 'http://127.0.0.1:8083';
   try {
-    const stored = await emailArchiveRequest('getOllamaSettings');
-    ollamaBaseUrl.value = stored.baseUrl || ollamaBaseUrl.value;
+    const stored = await emailArchiveRequest('getLlamaSettings');
+    embedBaseUrlInput.value = stored.embedBaseUrl || stored.baseUrl || embedBaseUrlInput.value;
   } catch (_) {
     /* use default URL */
   }
-  ollamaStatus.textContent = 'Click Test connection to link Ollama (required once after install).';
-  ollamaStatus.className = 'sync-status';
+  llamaStatus.textContent = 'Click Test connection to link the llama.cpp server (required once after install).';
+  llamaStatus.className = 'sync-status';
   await loadIndexSettings();
   await updateModelsList();
 
-  chatModelSelect.addEventListener('change', saveSelectedModels);
   embedModelSelect.addEventListener('change', saveSelectedModels);
   refreshModelsButton.addEventListener('click', async () => {
+    const embedUrl = normalizeBaseUrl(embedBaseUrlInput.value);
+    if (!embedUrl) {
+      llamaStatus.textContent = 'Enter an embedding server URL first.';
+      llamaStatus.className = 'sync-status error';
+      return;
+    }
+    const granted = await requestHostPermission(embedUrl);
+    if (!granted) {
+      llamaStatus.textContent = permissionDeniedMessage(embedUrl);
+      llamaStatus.className = 'sync-status error';
+      return;
+    }
     await loadModelPickers();
-    await updateOllamaStatus();
+    await updateLlamaStatus();
   });
   applyBaseUrlButton.addEventListener('click', testConnection);
   testConnectionButton.addEventListener('click', testConnection);
-  ollamaBaseUrl.addEventListener('keydown', event => {
+  embedBaseUrlInput.addEventListener('keydown', event => {
     if (event.key === 'Enter') testConnection();
   });
   maxSamplesPerFolderInput.addEventListener('change', saveIndexSettings);
@@ -363,12 +378,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     try {
       trainButton.disabled = true;
-      status.textContent = 'Indexing archive folders (Ollama)…';
+      status.textContent = 'Indexing archive folders (llama.cpp)…';
       status.className = '';
-      await updateOllamaStatus();
-
-      const stored = await emailArchiveRequest('getOllamaSettings');
-      await fetchOllamaTags(ollamaBaseUrl.value || stored.baseUrl);
+      await updateLlamaStatus();
 
       const result = await emailArchiveRequest('trainModel', {
         account: currentAccount,
@@ -389,6 +401,39 @@ document.addEventListener('DOMContentLoaded', async () => {
       status.className = 'error';
     } finally {
       trainButton.disabled = false;
+      trainAllButton.disabled = false;
+    }
+  });
+
+  trainAllButton.addEventListener('click', async () => {
+    try {
+      trainButton.disabled = true;
+      trainAllButton.disabled = true;
+      status.textContent = 'Indexing all accounts (llama.cpp)…';
+      status.className = '';
+      await updateLlamaStatus();
+
+      const result = await emailArchiveRequest('trainAllAccounts');
+      const parts = [];
+      if (result.trainedCount) {
+        parts.push(`${result.trainedCount} indexed`);
+      }
+      if (result.skippedCount) {
+        parts.push(`${result.skippedCount} skipped (no folders selected)`);
+      }
+      if (result.failedCount) {
+        parts.push(`${result.failedCount} failed`);
+      }
+      status.textContent = `All accounts: ${parts.join(', ') || 'nothing to do'}.`;
+      status.className = result.failedCount ? 'error' : 'success';
+      await updateModelsList();
+    } catch (error) {
+      console.error('Indexing all accounts error:', error);
+      status.textContent = `Error: ${error.message}`;
+      status.className = 'error';
+    } finally {
+      trainButton.disabled = false;
+      trainAllButton.disabled = false;
     }
   });
 
@@ -402,6 +447,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       folderCount.textContent = `${folderProgress.current} / ${folderProgress.total}`;
       messageCount.textContent = `${messageProgress.current} / ${messageProgress.total}`;
       currentFolder.textContent = `Folder: ${folderProgress.currentFolder}`;
+    } else if (message.type === 'training-account-start') {
+      currentFolder.textContent =
+        `Account ${message.accountIndex}/${message.accountTotal}: ${message.accountName}…`;
+      currentFolder.className = 'sync-status warning';
     } else if (message.type === 'folder-sync-start') {
       currentFolder.textContent = `Reading: ${message.folder}…`;
       currentFolder.className = 'sync-status warning';

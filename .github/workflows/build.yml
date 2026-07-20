@@ -24,12 +24,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: email-archive-assistant-xpi
-          path: Email-Archive-Assistant-*.xpi
+          path: dist/Email-Archive-Assistant-*.xpi
           if-no-files-found: error
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Email-Archive-Assistant-*.xpi
+          files: dist/Email-Archive-Assistant-*.xpi
           generate_release_notes: true
